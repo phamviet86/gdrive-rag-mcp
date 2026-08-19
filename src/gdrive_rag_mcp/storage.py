@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .embeddings import EmbeddingIdentity
 from .models import DocumentMetadata, SearchHit, SourceDocument
 
 
@@ -27,10 +28,23 @@ def _unpack(value: bytes) -> list[float]:
     return list(result)
 
 
+class ReindexRequiredError(RuntimeError):
+    """Raised when configured embeddings cannot safely share the existing index."""
+
+
 class SQLiteStore:
-    def __init__(self, path: Path, dimensions: int) -> None:
+    def __init__(
+        self,
+        path: Path,
+        dimensions: int,
+        embedding_identity: EmbeddingIdentity | None = None,
+        *,
+        enforce_identity: bool = True,
+    ) -> None:
         self.path = path
         self.dimensions = dimensions
+        self.embedding_identity = embedding_identity
+        self.enforce_identity = enforce_identity
         self.vector_extension = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
@@ -89,13 +103,75 @@ class SQLiteStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS index_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+            self._validate_embedding_identity(db)
             if self.vector_extension:
-                db.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
-                    f"embedding float[{self.dimensions}] distance_metric=cosine)"
+                self._create_vector_table(db)
+            db.commit()
+
+    def _create_vector_table(self, db: sqlite3.Connection) -> None:
+        db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
+            f"embedding float[{self.dimensions}] distance_metric=cosine)"
+        )
+
+    def _validate_embedding_identity(self, db: sqlite3.Connection) -> None:
+        identity = self.embedding_identity
+        if identity is None:
+            return
+        row = db.execute(
+            "SELECT value FROM index_metadata WHERE key='embedding_identity'"
+        ).fetchone()
+        chunk_count = int(db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        if row is None:
+            if chunk_count and self.enforce_identity:
+                raise ReindexRequiredError(
+                    "This legacy index contains vectors but no embedding identity, so their model "
+                    "cannot be safely inferred. Run `gdrive-rag-mcp reindex --yes` to rebuild it, "
+                    "or set GDRIVE_RAG_DB_PATH/GDRIVE_RAG_INDEX_PROFILE to a new index."
                 )
+            if not chunk_count:
+                if self.vector_extension:
+                    db.execute("DROP TABLE IF EXISTS vec_chunks")
+                self._write_embedding_identity(db, identity)
+            return
+        stored = json.loads(row["value"])
+        expected = identity.as_dict()
+        if stored != expected and self.enforce_identity:
+            raise ReindexRequiredError(
+                "Embedding configuration does not match this index. "
+                f"Stored={stored}; configured={expected}. "
+                "Run `gdrive-rag-mcp reindex --yes` or select a different database/profile."
+            )
+
+    @staticmethod
+    def _write_embedding_identity(db: sqlite3.Connection, identity: EmbeddingIdentity) -> None:
+        db.execute(
+            "INSERT INTO index_metadata(key,value,updated_at) VALUES('embedding_identity',?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (json.dumps(identity.as_dict(), sort_keys=True), _now()),
+        )
+
+    def reset_index(self, identity: EmbeddingIdentity) -> None:
+        """Delete generated index data and bind the empty index to a new embedding identity."""
+        with self.connection() as db:
+            db.execute("DELETE FROM chunks_fts")
+            db.execute("DELETE FROM chunks")
+            db.execute("DELETE FROM documents")
+            db.execute("DELETE FROM sync_state")
+            if self.vector_extension:
+                db.execute("DROP TABLE IF EXISTS vec_chunks")
+            self.dimensions = identity.dimensions
+            self.embedding_identity = identity
+            self._write_embedding_identity(db, identity)
+            if self.vector_extension:
+                self._create_vector_table(db)
             db.commit()
 
     def document_checksums(self) -> dict[str, str]:
@@ -299,13 +375,23 @@ class SQLiteStore:
             documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
             chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             state_rows = db.execute("SELECT key,value,updated_at FROM sync_state").fetchall()
+            identity_row = db.execute(
+                "SELECT value FROM index_metadata WHERE key='embedding_identity'"
+            ).fetchone()
         state = {
             row["key"]: {"value": json.loads(row["value"]), "updated_at": row["updated_at"]}
             for row in state_rows
         }
+        public_identity = None
+        if identity_row:
+            identity = json.loads(identity_row["value"])
+            public_identity = {
+                key: identity[key] for key in ("provider", "model", "dimensions", "fingerprint")
+            }
         return {
             "documents": documents,
             "chunks": chunks,
             "last_sync": state.get("last_sync"),
             "vector_backend": "sqlite-vec" if self.vector_extension else "sqlite-python-fallback",
+            "embedding_identity": public_identity,
         }

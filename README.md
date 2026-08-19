@@ -3,9 +3,14 @@
 [![CI](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local-first, agent-neutral MCP server that indexes one Google Drive folder (including nested
-folders) and provides multilingual hybrid retrieval. It is designed for Vietnamese and English
-knowledge bases and requires no LlamaCloud or OpenAI API.
+A local-first Google Drive hybrid index exposed through the Model Context Protocol (MCP). Choose an
+embedding provider and model that fit your languages, privacy boundary, and infrastructure; then
+query the same durable index from Codex, Hermes Agent, or any standards-compliant MCP client. The
+index is not tied to the agent that queries it.
+
+Google Drive/Workspace remains the read-only source of truth. The service stores extracted chunks,
+normalized embeddings, metadata, checksums, sync state, and index data—not downloaded source files.
+It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking boundary.
 
 > **Important:** retrieval assists research; it is not legal, tax, financial, economic, or business
 > advice. Agents and people must inspect the linked source, effective date, jurisdiction, and later
@@ -13,47 +18,67 @@ knowledge bases and requires no LlamaCloud or OpenAI API.
 
 ## What the MVP does
 
-- Reads Google Drive with the read-only Drive scope, limited by configuration to one folder or a
-  folder in a Shared Drive.
+- Recursively reads one configured Drive folder or Shared Drive scope with the read-only API.
 - Extracts Google Docs, Google Sheets, text/Markdown, text-based PDFs, and DOCX.
-- Uses LlamaIndex's `SentenceSplitter` as a replaceable pipeline component.
-- Creates Vietnamese-capable `gemini-embedding-001` embeddings (768 dimensions by default).
-- Stores only extracted chunks, embeddings, metadata, checksums, sync state, and index data in
-  SQLite. Source files remain in Drive.
-- Combines SQLite FTS5 keyword ranking with sqlite-vec cosine search. A tested Python cosine
-  fallback is used if the extension cannot load.
+- Supports Gemini, any verified OpenAI-compatible `/embeddings` endpoint, and optional local
+  Sentence Transformers behind one embedding protocol.
+- Combines Unicode-safe SQLite FTS5 keyword search with sqlite-vec cosine search. A tested Python
+  cosine fallback is used when the extension cannot load.
 - Reindexes changed files and removes deleted or out-of-scope files on later syncs.
-- Exposes the same read-only MCP tools over local stdio and bearer-protected Streamable HTTP.
+- Prevents vectors from different providers, models, endpoints, or dimensions from sharing an
+  index by recording and validating an embedding fingerprint.
+- Returns citations, source modified/indexed times, and a conservative evidence decision.
+- Exposes the same read-only tools over local stdio and bearer-protected Streamable HTTP.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    D[Selected Drive folder] -->|Drive API, read-only| X[Extractors]
-    X --> L[LlamaIndex chunking]
-    L --> G[Gemini Embedding API]
-    L --> S[(SQLite chunks + metadata)]
-    G --> V[(sqlite-vec / vector fallback)]
-    S --> R[Hybrid retriever + evidence gate]
-    V --> R
-    R --> M[MCP tools]
-    M --> C[Codex / Hermes / MCP clients]
+    D[Selected Google Drive scope] -->|read-only Drive API| X[Format extractors]
+    X --> L[LlamaIndex chunking boundary]
+    L --> E{Embedding provider}
+    E -->|Gemini| V[Normalized vectors]
+    E -->|OpenAI-compatible HTTP| V
+    E -->|Local Sentence Transformers| V
+    L --> S[(SQLite documents + FTS5)]
+    V --> Q[(sqlite-vec / cosine fallback)]
+    S --> R[Hybrid ranking + evidence gate]
+    Q --> R
+    R --> M[Agent-neutral MCP tools]
+    M --> A[Any compatible MCP client]
 ```
 
-Google and Gemini credentials stay with the service operator. Remote clients receive only an MCP
-URL and bearer token; tools never return credentials.
+Google, embedding-provider, and local-model credentials/resources stay with the service operator.
+Remote clients receive only an MCP URL and bearer token.
 
-## Prerequisites
+## Embedding providers
 
-- Python 3.11 or 3.12
-- A Google Cloud project with the **Google Drive API** enabled
-- A Gemini API key with access to `gemini-embedding-001`
-- Either a service-account JSON file or an OAuth Desktop client JSON file
+Language coverage is a property of the selected model, not an indexing “language mode.” FTS5 uses
+SQLite's Unicode tokenizer, while semantic quality depends on the model and domain. Evaluate your
+actual languages and documents; this project does not claim perfect support for every language.
 
-The stable Gemini model supports flexible output sizes and recommends 768 among its supported
-dimensions; see the [official Gemini model documentation](https://ai.google.dev/gemini-api/docs/models/gemini-embedding-001).
+| Provider | Execution/privacy | Multilingual suitability | Extra install | Notes |
+|---|---|---|---|---|
+| `gemini` (default) | Hosted; chunks and queries go to Google's embedding API | Model-dependent; the default is designed for multilingual retrieval | None | Backward-compatible provider/model/dimension defaults |
+| `openai-compatible` | Hosted or self-hosted; data goes to the configured base URL | Model-dependent | None | Implements the documented `POST /embeddings` JSON contract; API key may be optional for a trusted local endpoint |
+| `sentence-transformers` | Local process/device after model download | Choose and evaluate a multilingual retrieval model | `pip install 'gdrive-rag-mcp[sentence-transformers]'` | Heavy PyTorch/model dependencies stay out of the base install |
 
-## Install and configure
+Changing the embedding provider, model, endpoint, or dimensions requires rebuilding that vector
+index. Changing MCP clients or agents does **not** require reindexing.
+
+The HTTP adapter follows the [official OpenAI embeddings request/response schema](https://platform.openai.com/docs/api-reference/embeddings/create),
+including batched string input, ordered results, optional dimensions, and float vectors. A dedicated
+Ollama adapter is not claimed. If a particular Ollama deployment explicitly implements that
+`/v1/embeddings` contract, test it as an OpenAI-compatible endpoint and set
+`GDRIVE_RAG_EMBED_SEND_DIMENSIONS=false` if that deployment does not accept the dimensions field.
+
+Gemini uses retrieval-specific query/document tasks and explicit output dimensions described in
+the [official Gemini embedding documentation](https://ai.google.dev/gemini-api/docs/embeddings).
+The local adapter uses the documented Sentence Transformers
+[`encode_query` and `encode_document`](https://www.sbert.net/docs/package_reference/sentence_transformer/model.html)
+methods with normalized output.
+
+## Install
 
 ```bash
 git clone https://github.com/phamviet86/gdrive-rag-mcp.git
@@ -64,34 +89,93 @@ pip install -e .
 cp .env.example .env
 ```
 
-This project does not automatically parse `.env`; load it with your shell or process manager. For
-example, `set -a; . ./.env; set +a` in a trusted interactive shell. Never commit `.env`.
+For the local provider, install `pip install -e '.[sentence-transformers]'` instead. The project does
+not automatically parse `.env`; load it with your shell or process manager. For example,
+`set -a; . ./.env; set +a` in a trusted interactive shell. Never commit `.env`.
 
-### Google authentication: service account (recommended for least privilege)
+## Configure an embedding provider
 
-1. Create a service account in your Google Cloud project and download its JSON key to an
-   operator-only secrets directory.
-2. Share only the selected Drive folder with the service account's email as **Viewer**. This is the
-   strongest folder boundary for this MVP: an otherwise unprivileged service account can see only
-   what was explicitly shared with it.
-3. Set `GOOGLE_SERVICE_ACCOUNT_FILE` and `GDRIVE_FOLDER_ID`. For Shared Drives, add the service
-   account as a member with the minimum read role and set `GDRIVE_SHARED_DRIVE_ID`.
+Secret values come from the environment variable named by
+`GDRIVE_RAG_EMBED_API_KEY_ENV`. The variable name is configuration; the secret value is never
+stored in the index fingerprint or sample files.
 
-Do not enable domain-wide delegation unless your organization has separately reviewed and needs
-it. The code requests only `https://www.googleapis.com/auth/drive.readonly`.
+### Gemini (backward-compatible default)
 
-### Google authentication: user OAuth
+Existing environment configuration remains valid: if provider settings are absent, the service
+uses Gemini, `gemini-embedding-001`, 768 dimensions, and `GEMINI_API_KEY`.
 
-1. Create an OAuth **Desktop app** client and put its JSON file outside the repository.
+```bash
+export GDRIVE_RAG_EMBED_PROVIDER=gemini
+export GDRIVE_RAG_EMBED_MODEL=gemini-embedding-001
+export GDRIVE_RAG_EMBED_DIMENSIONS=768
+export GDRIVE_RAG_EMBED_API_KEY_ENV=GEMINI_API_KEY
+export GEMINI_API_KEY=your_runtime_secret
+```
+
+### OpenAI-compatible endpoint
+
+```bash
+export GDRIVE_RAG_EMBED_PROVIDER=openai-compatible
+export GDRIVE_RAG_EMBED_MODEL=text-embedding-3-small
+export GDRIVE_RAG_EMBED_DIMENSIONS=1536
+export GDRIVE_RAG_EMBED_BASE_URL=https://api.openai.com/v1
+export GDRIVE_RAG_EMBED_API_KEY_ENV=OPENAI_API_KEY
+export OPENAI_API_KEY=your_runtime_secret
+```
+
+For another compatible endpoint, replace the base URL, model, dimensions, and key variable. Never
+put credentials in the base URL. Set `GDRIVE_RAG_EMBED_SEND_DIMENSIONS=false` only when the verified
+endpoint/model does not accept that optional field; the configured output dimension is still
+validated on every response.
+
+### Local Sentence Transformers
+
+```bash
+pip install -e '.[sentence-transformers]'
+export GDRIVE_RAG_EMBED_PROVIDER=sentence-transformers
+export GDRIVE_RAG_EMBED_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+export GDRIVE_RAG_EMBED_DIMENSIONS=384
+export GDRIVE_RAG_EMBED_DEVICE=cpu  # or a device supported by your local installation
+```
+
+The model name above is an example, not a universal recommendation. Model download/cache behavior,
+licenses, language coverage, memory use, and hardware requirements belong to the selected model.
+
+Common tuning:
+
+```bash
+export GDRIVE_RAG_EMBED_BATCH_SIZE=32
+export GDRIVE_RAG_EMBED_TIMEOUT_SECONDS=60
+```
+
+All providers return normalized vectors and must return exactly the configured dimensions.
+
+## Google authentication
+
+Enable the Google Drive API, then choose one method.
+
+### Service account (recommended for least privilege)
+
+1. Create a service account and keep its JSON key in an operator-only secrets directory.
+2. Share only the selected Drive folder with its email as **Viewer**. This creates a stronger folder
+   boundary than a user OAuth token.
+3. Set `GOOGLE_SERVICE_ACCOUNT_FILE` and `GDRIVE_FOLDER_ID`. For a Shared Drive, add the account
+   with the minimum read role and set `GDRIVE_SHARED_DRIVE_ID`.
+
+Do not enable domain-wide delegation unless separately reviewed. The code requests only
+`https://www.googleapis.com/auth/drive.readonly`.
+
+### User OAuth
+
+1. Create an OAuth Desktop app client and keep its JSON outside the repository.
 2. Set `GOOGLE_OAUTH_CLIENT_FILE` and `GOOGLE_OAUTH_TOKEN_FILE`.
 3. Run `gdrive-rag-mcp auth-google` once and approve read-only access.
 
-The Drive API has no OAuth scope that means “read only this existing folder.” The OAuth token can
-read files the user can read; the indexer enforces the configured folder during traversal. Prefer a
-folder-shared service account when credential-level isolation matters. Scope details are in
-[Google's Drive authorization guide](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
+The Drive API has no OAuth scope meaning “read only this existing folder.” The OAuth token can read
+files the user can read; the indexer enforces the configured folder during traversal. See Google's
+[Drive authorization guide](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
 
-### Build and refresh the index
+## Build, refresh, and migrate an index
 
 ```bash
 gdrive-rag-mcp init-db
@@ -99,25 +183,49 @@ gdrive-rag-mcp sync
 gdrive-rag-mcp status
 ```
 
-Run `sync` periodically with cron, systemd, a container scheduler, or your platform scheduler. A
-sync records `completed_at`; `check_index_status` exposes it. The MVP scans the configured tree on
-each run, avoids rechunking/re-embedding unchanged checksums, reindexes a changed whole file, and
-deletes stale records.
+Run `sync` periodically. It scans the selected tree, avoids rechunking/re-embedding unchanged
+checksums, reindexes a changed whole file, deletes stale records, and records `completed_at`.
+
+### Embedding fingerprint and legacy indexes
+
+Each database records provider, model, dimensions, endpoint identity, and a SHA-256 fingerprint.
+The MCP status tool returns provider/model/dimensions/fingerprint but does not expose the endpoint.
+
+Version 0.1.x databases did not record embedding identity. A non-empty legacy index cannot be
+safely inferred—even if it probably used the old Gemini default—so version 0.2 refuses to open it.
+Back up the database if desired, load the same Drive/provider credentials, then explicitly rebuild:
+
+```bash
+gdrive-rag-mcp reindex --yes
+```
+
+The command deletes only generated index data in the selected database and performs a full Drive
+sync. It does not modify Drive. An empty legacy database is stamped automatically.
+
+To keep multiple intentional indexes, use named profiles or explicit paths:
+
+```bash
+GDRIVE_RAG_INDEX_PROFILE=gemini gdrive-rag-mcp sync
+GDRIVE_RAG_INDEX_PROFILE=local-multilingual gdrive-rag-mcp sync
+# Or set GDRIVE_RAG_DB_PATH explicitly for complete path control.
+```
+
+The default profile keeps the backward-compatible `data/index.db` path; other profiles derive
+`data/index-<profile>.db`.
 
 ## MCP tools
 
-All tools are marked read-only in MCP metadata.
+All tool names and instructions are agent-neutral and marked read-only.
 
 | Tool | Purpose |
 |---|---|
 | `search_knowledge(query, limit)` | Hybrid search, citations, freshness, and evidence decision |
 | `get_document(document_id)` | Full indexed text assembled from ordered chunks |
 | `get_document_metadata(document_id)` | URL, MIME type, checksum, modified/indexed times |
-| `check_index_status()` | Counts, last sync, and active vector backend |
+| `check_index_status()` | Counts, last sync, vector backend, and embedding fingerprint |
 
-`search_knowledge` returns normal `results` only when the top score reaches
-`GDRIVE_RAG_EVIDENCE_THRESHOLD`. Weak candidates are separated into `candidate_results` for
-diagnostics, with an explicit instruction to abstain.
+Weak hits are placed in `candidate_results` for diagnostics; normal `results` remain empty when the
+top score is below `GDRIVE_RAG_EVIDENCE_THRESHOLD`.
 
 ## Local mode (stdio)
 
@@ -125,13 +233,14 @@ diagnostics, with an explicit instruction to abstain.
 gdrive-rag-mcp serve --transport stdio
 ```
 
-The client launches this command. The operator must make the database and required environment
-variables available to that subprocess. MCP clients do not send Google or Gemini credentials over
-MCP.
+The client launches this process. Make the database and provider configuration available to that
+subprocess. Search needs provider access for the query embedding; it never needs Google credentials
+unless the same process also performs sync.
 
 ### Hermes Agent local YAML
 
-Add to `~/.hermes/config.yaml`; keep actual values in `~/.hermes/.env` or the parent environment.
+Hermes reads MCP servers from `~/.hermes/config.yaml` and supports environment substitution. Keep
+actual secrets in `~/.hermes/.env` or the parent environment.
 
 ```yaml
 mcp_servers:
@@ -140,64 +249,79 @@ mcp_servers:
     args: ["serve", "--transport", "stdio"]
     env:
       GDRIVE_RAG_DB_PATH: "${GDRIVE_RAG_DB_PATH}"
+      GDRIVE_RAG_EMBED_PROVIDER: "${GDRIVE_RAG_EMBED_PROVIDER}"
+      GDRIVE_RAG_EMBED_MODEL: "${GDRIVE_RAG_EMBED_MODEL}"
+      GDRIVE_RAG_EMBED_DIMENSIONS: "${GDRIVE_RAG_EMBED_DIMENSIONS}"
+      GDRIVE_RAG_EMBED_API_KEY_ENV: "${GDRIVE_RAG_EMBED_API_KEY_ENV}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"
     timeout: 120
     connect_timeout: 30
     supports_parallel_tool_calls: true
 ```
 
-Search requires Gemini for the query embedding. A separately scheduled sync process holds Google
-credentials; the stdio query server does not need them.
+Replace the final secret variable with the one named by your provider configuration. The format is
+based on the [official Hermes MCP guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/mcp.md).
 
 ### Codex local TOML
 
-Add to `~/.codex/config.toml` (or trusted project `.codex/config.toml`):
+Add to `~/.codex/config.toml` or a trusted project `.codex/config.toml`:
 
 ```toml
 [mcp_servers.gdrive_knowledge]
 command = "/path/to/gdrive-rag-mcp/.venv/bin/gdrive-rag-mcp"
 args = ["serve", "--transport", "stdio"]
 cwd = "/path/to/gdrive-rag-mcp"
-env_vars = ["GDRIVE_RAG_DB_PATH", "GEMINI_API_KEY"]
+env_vars = [
+  "GDRIVE_RAG_DB_PATH",
+  "GDRIVE_RAG_EMBED_PROVIDER",
+  "GDRIVE_RAG_EMBED_MODEL",
+  "GDRIVE_RAG_EMBED_DIMENSIONS",
+  "GDRIVE_RAG_EMBED_BASE_URL",
+  "GDRIVE_RAG_EMBED_API_KEY_ENV",
+  "GEMINI_API_KEY",
+  "OPENAI_API_KEY",
+]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 required = true
 ```
 
-Codex supports stdio environment forwarding and Streamable HTTP bearer tokens as documented in
-the [official Codex MCP guide](https://developers.openai.com/codex/mcp).
+Codex's current stdio forwarding and remote bearer-token keys are documented in the
+[official Codex MCP guide](https://developers.openai.com/codex/mcp).
 
 ## Server mode (Streamable HTTP)
-
-Generate a token with at least 32 random characters and store it in a secret manager:
 
 ```bash
 export GDRIVE_RAG_BEARER_TOKEN="$(openssl rand -hex 32)"
 gdrive-rag-mcp serve --transport http
 ```
 
-The MCP endpoint is `http://127.0.0.1:8000/mcp`; `GET /health` is an unauthenticated liveness
-check with no index details. Every `/mcp` request requires `Authorization: Bearer ...`.
+The endpoint is `http://127.0.0.1:8000/mcp`; `GET /health` is an unauthenticated liveness check that
+returns no index details. Every `/mcp` request requires `Authorization: Bearer ...`.
 
-For network deployment, terminate TLS at a trusted reverse proxy/load balancer, pass the
-`Authorization` header unchanged, restrict inbound networks where possible, and bind the app only
-to the proxy network. Never expose plain HTTP or put a bearer token in a URL, image, or repository.
+Terminate TLS at a trusted reverse proxy/load balancer, preserve the Authorization header, restrict
+inbound networks, and bind the application only to the proxy network. Never expose plain HTTP or put
+a bearer token in a URL or repository.
 
 ### Docker Compose
 
-The provided Compose file assumes service-account authentication:
+The base image includes Gemini and HTTP providers but not PyTorch/Sentence Transformers.
 
 ```bash
 mkdir -p secrets
 # Place service-account.json in secrets/; this directory is ignored.
+export GDRIVE_FOLDER_ID=your-folder-id
 export GDRIVE_RAG_BEARER_TOKEN="$(openssl rand -hex 32)"
-export GEMINI_API_KEY="your-runtime-secret"
-export GDRIVE_FOLDER_ID="your-folder-id"
+export GDRIVE_RAG_EMBED_PROVIDER=gemini
+export GDRIVE_RAG_EMBED_API_KEY_ENV=GEMINI_API_KEY
+export GEMINI_API_KEY=your-runtime-secret
 docker compose run --rm app sync
 docker compose up -d app
 ```
 
-The named `index-data` volume persists SQLite data. The image contains no credentials or index.
+For local Sentence Transformers, set `GDRIVE_RAG_EXTRAS=sentence-transformers` before building and
+choose a suitable image/runtime for the hardware. For separate container indexes, set distinct
+`GDRIVE_RAG_DB_PATH` values under `/data`. The `index-data` volume persists SQLite data.
 
 ### Hermes Agent remote YAML
 
@@ -223,31 +347,46 @@ tool_timeout_sec = 120
 required = true
 ```
 
+### Generic MCP client
+
+MCP configuration file syntax is client-specific. Any standards-compliant client can use either:
+
+- stdio: command `gdrive-rag-mcp`, arguments `serve --transport stdio`, plus the operator's index
+  and embedding environment; or
+- Streamable HTTP: URL `https://knowledge.example.com/mcp` and header
+  `Authorization: Bearer $GDRIVE_RAG_BEARER_TOKEN`.
+
+The server does not expose Google or embedding-provider credentials to the client. For OpenClaw or
+another agent without a verified native format here, configure its standards-compliant MCP adapter
+with those transport values rather than copying an unverified client-specific snippet.
+
 ## Security and data handling
 
-- The repository ignores `.env`, databases, OAuth tokens, client secrets, service-account keys,
-  downloaded data, and generated indexes.
-- SQLite contains extracted source text. Protect its file/volume as confidential data, encrypt
-  disks/backups, and restrict OS access.
-- Rotate bearer tokens and Google/Gemini credentials. Restart the service after rotation.
+- `.env`, databases, OAuth tokens, client secrets, service-account keys, downloaded files, model
+  caches, and generated indexes must remain outside source control.
+- SQLite contains extracted source text. Encrypt disks/backups and restrict OS/volume access.
+- Hosted embedding providers receive extracted chunks during sync and queries during search. Review
+  their data terms and residency. Use a suitable local model when data must not leave the host.
+- API-key values come only from environment variables. Base URLs containing credentials are rejected.
+- The fingerprint stores a provider/model/dimension/endpoint identity, never an API key. MCP status
+  omits the endpoint.
+- Rotate MCP, Google, and embedding-provider credentials and restart after rotation.
 - Tools are retrieval-only; Drive writes and index mutation are not exposed through MCP.
-- Bearer auth is intentionally simple. For enterprise deployments, a secure reverse proxy may add
-  identity-aware access, mTLS, rate limiting, audit logs, and short-lived tokens.
-- See [SECURITY.md](SECURITY.md) for private vulnerability reporting and deployment hardening.
+- See [SECURITY.md](SECURITY.md) for reporting and deployment hardening.
 
 ## Honest limitations
 
 - Scanned/image-only PDFs need OCR before indexing; this project does not perform OCR.
-- Sheets index displayed cell values and sheet names, not charts, drawings, comments, hidden-state
-  semantics, or formula logic. Very large sheets may be expensive to export.
+- Sheets index displayed cell values and sheet names, not charts, comments, or formula logic.
 - Docs comments, suggestions, revision history, linked files, and rich layout are not preserved.
-- Google Slides, images, audio, video, shortcuts, and arbitrary binary formats are skipped.
-- Sync is a folder-tree scan rather than the Drive Changes API. Changes appear only after the next
-  successful sync. A failed sync does not update the recorded completion time.
-- Search scores are heuristics, not probabilities. Tune the evidence threshold with domain-specific
-  evaluation before relying on it in high-stakes research.
-- SQLite is appropriate for a small shared service, not high-write or large distributed workloads.
-  Storage/retrieval adapters are deliberately isolated for later replacement.
+- Slides, images, audio, video, shortcuts, and arbitrary binary formats are skipped.
+- Sync is a folder-tree scan, not the Drive Changes API. Changes appear after the next successful sync.
+- Search scores are heuristics, not probabilities. Tune the evidence threshold with domain-specific,
+  multilingual evaluation before high-stakes use.
+- FTS tokenization is Unicode-aware but not a language-specific morphological analyzer. Languages
+  without whitespace or with complex segmentation may depend more heavily on semantic retrieval.
+- SQLite suits a small shared service, not high-write or large distributed workloads. Persistence
+  and retrieval remain isolated so they can be replaced later.
 
 ## Development
 
@@ -261,19 +400,24 @@ mypy src/gdrive_rag_mcp
 pytest
 ```
 
-Tests use deterministic fake embeddings and fake sources; they require no Google or Gemini
-credentials. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Tests use fake sources, HTTP transports, and deterministic Unicode-safe embeddings. They require no
+Google, Gemini, OpenAI, or local model credentials. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Khởi động nhanh bằng tiếng Việt
 
+Đây là ví dụ cộng đồng; dự án không mặc định một ngôn ngữ. Chất lượng tìm kiếm ngữ nghĩa phụ thuộc
+vào model embedding đã chọn.
+
 1. Tạo service account, bật Google Drive API, rồi chia sẻ **chỉ thư mục cần lập chỉ mục** với quyền
    Viewer.
-2. Sao chép `.env.example` thành `.env`, điền `GDRIVE_FOLDER_ID`, `GEMINI_API_KEY` và đường dẫn tệp
-   service account ở ngoài repository.
-3. Nạp biến môi trường, chạy `gdrive-rag-mcp sync`, sau đó chạy
-   `gdrive-rag-mcp serve --transport stdio` hoặc server HTTP có bearer token.
-4. Cấu hình Hermes/Codex theo mẫu phía trên. Khi `evidence.sufficient=false`, agent phải từ chối kết
-   luận; luôn mở nguồn Google Drive, kiểm tra ngày hiệu lực và trích dẫn.
+2. Sao chép `.env.example` thành `.env`; cấu hình thư mục Drive, provider/model embedding và secret
+   qua biến môi trường.
+3. Chọn model có chất lượng tiếng Việt đã được bạn đánh giá, sau đó chạy `gdrive-rag-mcp sync`.
+4. Chạy stdio hoặc HTTP MCP và kết nối bằng bất kỳ MCP client tương thích nào. Đổi agent không cần
+   lập chỉ mục lại; đổi provider/model/dimensions thì chạy `gdrive-rag-mcp reindex --yes` hoặc dùng
+   profile/database khác.
+5. Khi `evidence.sufficient=false`, agent phải từ chối kết luận; luôn mở nguồn Drive, kiểm tra ngày
+   hiệu lực và trích dẫn.
 
 ## License
 

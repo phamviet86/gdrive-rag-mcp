@@ -21,10 +21,12 @@ READ_ONLY = ToolAnnotations(
 def create_mcp_server(service: KnowledgeService) -> MCPServer[Any]:
     server: MCPServer[Any] = MCPServer(
         "gdrive-rag-mcp",
-        version="0.1.0",
+        version="0.2.0",
         instructions=(
-            "Search an operator-managed Google Drive index. Treat evidence.sufficient=false as an "
-            "instruction to abstain. Cite source URLs and verify modified dates."
+            "Search an operator-managed Google Drive index from any MCP-compatible client. Treat "
+            "evidence.sufficient=false as an instruction to abstain. Cite source URLs and verify "
+            "modified dates. The index and embedding provider are independent of the querying "
+            "agent."
         ),
     )
 
@@ -57,7 +59,7 @@ def create_mcp_server(service: KnowledgeService) -> MCPServer[Any]:
 
     @server.tool(annotations=READ_ONLY)
     def check_index_status() -> dict[str, Any]:
-        """Check index counts, vector backend, and last completed sync/freshness time."""
+        """Check counts, vector backend, embedding fingerprint, and sync freshness."""
         return service.store.status()
 
     return server

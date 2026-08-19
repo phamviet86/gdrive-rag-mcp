@@ -25,7 +25,7 @@ class Transport(StrEnum):
 def init_db() -> None:
     """Initialize or migrate the SQLite index."""
     settings = Settings.from_env()
-    store = SQLiteStore(settings.db_path, settings.embed_dimensions)
+    store = SQLiteStore(settings.db_path, settings.embed_dimensions, settings.embedding_identity())
     typer.echo(json.dumps(store.status(), indent=2))
 
 
@@ -40,8 +40,31 @@ def sync() -> None:
 def status() -> None:
     """Show index counts and freshness without external API calls."""
     settings = Settings.from_env()
-    store = SQLiteStore(settings.db_path, settings.embed_dimensions)
+    store = SQLiteStore(settings.db_path, settings.embed_dimensions, settings.embedding_identity())
     typer.echo(json.dumps(store.status(), indent=2))
+
+
+@app.command()
+def reindex(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm deletion and full rebuild of generated index data."),
+    ] = False,
+) -> None:
+    """Delete the selected generated index and rebuild it with the configured embedder."""
+    if not yes:
+        raise typer.BadParameter("Reindex deletes generated index data; rerun with --yes")
+    settings = Settings.from_env()
+    settings.require_sync()
+    store = SQLiteStore(
+        settings.db_path,
+        settings.embed_dimensions,
+        settings.embedding_identity(),
+        enforce_identity=False,
+    )
+    store.reset_index(settings.embedding_identity())
+    service = KnowledgeService(settings)
+    typer.echo(json.dumps(service.sync(), indent=2))
 
 
 @app.command("auth-google")
