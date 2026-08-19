@@ -17,8 +17,15 @@ for rotation.
 ## Operator checklist
 
 - Use a service account shared only into the selected folder where possible.
-- Keep Google JSON keys, OAuth tokens, Gemini keys, bearer tokens, SQLite files, and backups outside
-  source control with restrictive filesystem permissions.
+- Keep Google JSON keys, OAuth tokens, embedding-provider keys, bearer tokens, SQLite files, model
+  caches, and backups outside source control with restrictive filesystem permissions.
+- Treat hosted embedding endpoints as data processors: extracted chunks leave the service during
+  indexing and search queries leave it at retrieval time. Review provider retention, training,
+  residency, and access policies. Use an evaluated local provider when data must stay on-host.
+- Supply embedding secrets only through the environment variable named by
+  `GDRIVE_RAG_EMBED_API_KEY_ENV`. Never put credentials in an embedding base URL.
+- Do not bypass embedding fingerprint failures. Mixing providers, models, endpoints, or dimensions
+  can silently corrupt retrieval; rebuild the generated index or select another database/profile.
 - Use TLS and a trusted reverse proxy for remote access. Add network allowlists, rate limiting,
   identity-aware access or mTLS when appropriate.
 - Generate at least 32 random bytes for the bearer token and rotate it periodically.

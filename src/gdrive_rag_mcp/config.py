@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from .embeddings import EmbeddingIdentity
+
+SUPPORTED_EMBED_PROVIDERS = {"gemini", "openai-compatible", "sentence-transformers"}
 
 
 def _int(name: str, default: int) -> int:
@@ -13,14 +19,46 @@ def _float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    if value.casefold() in {"1", "true", "yes", "on"}:
+        return True
+    if value.casefold() in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _provider(value: str) -> str:
+    normalized = value.strip().casefold().replace("_", "-")
+    if normalized not in SUPPORTED_EMBED_PROVIDERS:
+        choices = ", ".join(sorted(SUPPORTED_EMBED_PROVIDERS))
+        raise ValueError(f"GDRIVE_RAG_EMBED_PROVIDER must be one of: {choices}")
+    return normalized
+
+
+def _profile_path(profile: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", profile):
+        raise ValueError("GDRIVE_RAG_INDEX_PROFILE may contain only letters, numbers, ., _, and -")
+    return Path("data/index.db" if profile == "default" else f"data/index-{profile}.db")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     folder_id: str = ""
     shared_drive_id: str | None = None
     db_path: Path = Path("data/index.db")
-    gemini_api_key: str = ""
+    index_profile: str = "default"
+    embed_provider: str = "gemini"
     embed_model: str = "gemini-embedding-001"
     embed_dimensions: int = 768
+    embed_base_url: str = "https://api.openai.com/v1"
+    embed_api_key_env: str = "GEMINI_API_KEY"
+    embed_batch_size: int = 32
+    embed_timeout_seconds: float = 60.0
+    embed_send_dimensions: bool = True
+    embed_device: str = ""
     chunk_size: int = 700
     chunk_overlap: int = 100
     evidence_threshold: float = 0.35
@@ -37,13 +75,30 @@ class Settings:
             value = os.getenv(name)
             return Path(value) if value else None
 
-        return cls(
+        provider = _provider(os.getenv("GDRIVE_RAG_EMBED_PROVIDER", "gemini"))
+        default_key_env = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
+        profile = os.getenv("GDRIVE_RAG_INDEX_PROFILE", "default")
+        db_path = (
+            Path(os.environ["GDRIVE_RAG_DB_PATH"])
+            if "GDRIVE_RAG_DB_PATH" in os.environ
+            else _profile_path(profile)
+        )
+        settings = cls(
             folder_id=os.getenv("GDRIVE_FOLDER_ID", ""),
             shared_drive_id=os.getenv("GDRIVE_SHARED_DRIVE_ID") or None,
-            db_path=Path(os.getenv("GDRIVE_RAG_DB_PATH", "data/index.db")),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+            db_path=db_path,
+            index_profile=profile,
+            embed_provider=provider,
             embed_model=os.getenv("GDRIVE_RAG_EMBED_MODEL", "gemini-embedding-001"),
             embed_dimensions=_int("GDRIVE_RAG_EMBED_DIMENSIONS", 768),
+            embed_base_url=os.getenv(
+                "GDRIVE_RAG_EMBED_BASE_URL", "https://api.openai.com/v1"
+            ).rstrip("/"),
+            embed_api_key_env=os.getenv("GDRIVE_RAG_EMBED_API_KEY_ENV", default_key_env),
+            embed_batch_size=_int("GDRIVE_RAG_EMBED_BATCH_SIZE", 32),
+            embed_timeout_seconds=_float("GDRIVE_RAG_EMBED_TIMEOUT_SECONDS", 60.0),
+            embed_send_dimensions=_bool("GDRIVE_RAG_EMBED_SEND_DIMENSIONS", True),
+            embed_device=os.getenv("GDRIVE_RAG_EMBED_DEVICE", ""),
             chunk_size=_int("GDRIVE_RAG_CHUNK_SIZE", 700),
             chunk_overlap=_int("GDRIVE_RAG_CHUNK_OVERLAP", 100),
             evidence_threshold=_float("GDRIVE_RAG_EVIDENCE_THRESHOLD", 0.35),
@@ -56,13 +111,61 @@ class Settings:
             host=os.getenv("GDRIVE_RAG_HOST", "127.0.0.1"),
             port=_int("GDRIVE_RAG_PORT", 8000),
         )
+        settings.validate_embedding()
+        return settings
+
+    def validate_embedding(self) -> None:
+        _provider(self.embed_provider)
+        if not self.embed_model.strip():
+            raise ValueError("GDRIVE_RAG_EMBED_MODEL must not be empty")
+        if self.embed_dimensions <= 0:
+            raise ValueError("GDRIVE_RAG_EMBED_DIMENSIONS must be positive")
+        if self.embed_batch_size <= 0:
+            raise ValueError("GDRIVE_RAG_EMBED_BATCH_SIZE must be positive")
+        if self.embed_timeout_seconds <= 0:
+            raise ValueError("GDRIVE_RAG_EMBED_TIMEOUT_SECONDS must be positive")
+        if self.embed_provider == "openai-compatible" and not self.embed_base_url:
+            raise ValueError("GDRIVE_RAG_EMBED_BASE_URL is required for openai-compatible")
+        parsed_url = urlsplit(self.embed_base_url)
+        if self.embed_provider == "openai-compatible" and (
+            parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc
+        ):
+            raise ValueError("GDRIVE_RAG_EMBED_BASE_URL must be an HTTP(S) API base URL")
+        if parsed_url.username or parsed_url.password:
+            raise ValueError("Do not put credentials in GDRIVE_RAG_EMBED_BASE_URL")
+        if self.embed_provider == "openai-compatible" and (parsed_url.query or parsed_url.fragment):
+            raise ValueError(
+                "GDRIVE_RAG_EMBED_BASE_URL must not contain a query string or fragment"
+            )
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.embed_api_key_env):
+            raise ValueError("GDRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name")
+        _profile_path(self.index_profile)
+
+    def embedding_api_key(self, required: bool) -> str:
+        value = os.getenv(self.embed_api_key_env, "")
+        if required and not value:
+            raise ValueError(
+                f"Embedding provider {self.embed_provider!r} requires secret environment variable "
+                f"{self.embed_api_key_env}"
+            )
+        return value
+
+    def embedding_identity(self) -> EmbeddingIdentity:
+        endpoint = {
+            "gemini": "google-gemini-api",
+            "openai-compatible": self.embed_base_url.rstrip("/"),
+            "sentence-transformers": "local",
+        }[self.embed_provider]
+        return EmbeddingIdentity(
+            self.embed_provider, self.embed_model, self.embed_dimensions, endpoint
+        )
 
     def require_sync(self) -> None:
         missing = []
         if not self.folder_id:
             missing.append("GDRIVE_FOLDER_ID")
-        if not self.gemini_api_key:
-            missing.append("GEMINI_API_KEY")
+        if self.embed_provider == "gemini" and not os.getenv(self.embed_api_key_env):
+            missing.append(self.embed_api_key_env)
         if not (
             self.service_account_file or self.oauth_client_file or self.oauth_token_file.exists()
         ):

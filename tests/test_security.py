@@ -42,6 +42,7 @@ def test_sample_configuration_contains_placeholders_only() -> None:
     assert "AIza" not in sample
     assert "/Users/" not in sample
     assert "your_gemini_api_key" in sample
+    assert "your_embedding_api_key" in sample
     ignore = Path(".gitignore").read_text(encoding="utf-8")
     for pattern in (".env", "token*.json", "service-account*.json", "secrets/", "*.db"):
         assert pattern in ignore

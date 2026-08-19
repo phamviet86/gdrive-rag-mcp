@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from gdrive_rag_mcp.embeddings import HashingEmbedder
 from gdrive_rag_mcp.models import SourceDocument
 from gdrive_rag_mcp.retrieval import HybridRetriever
@@ -56,3 +58,26 @@ def test_keyword_signal_can_rescue_exact_term(tmp_path: Path) -> None:
     result = HybridRetriever(store, embedder, evidence_threshold=0.1).search("80/2021/TT-BTC")
     candidates = result["results"] or result["candidate_results"]
     assert candidates[0]["document_id"] == "exact"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("corporate income tax deadline", "english"),
+        ("thời hạn thuế thu nhập doanh nghiệp", "vietnamese"),
+        ("موعد ضريبة الشركات", "arabic"),
+    ],
+)
+def test_unicode_hybrid_retrieval_across_multiple_scripts(
+    tmp_path: Path, query: str, expected: str
+) -> None:
+    embedder = HashingEmbedder(128)
+    store = SQLiteStore(tmp_path / "index.db", embedder.dimensions)
+    add(store, embedder, "english", "Corporate income tax filing deadline and forms")
+    add(store, embedder, "vietnamese", "Thời hạn khai thuế thu nhập doanh nghiệp và biểu mẫu")
+    add(store, embedder, "arabic", "موعد تقديم ضريبة الشركات والنماذج المطلوبة")
+
+    result = HybridRetriever(store, embedder, evidence_threshold=0.15).search(query)
+    candidates = result["results"] or result["candidate_results"]
+
+    assert candidates[0]["document_id"] == expected
