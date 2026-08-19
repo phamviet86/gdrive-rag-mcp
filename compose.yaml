@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      GDRIVE_FOLDER_ID: ${GDRIVE_FOLDER_ID:?set GDRIVE_FOLDER_ID}
+      GDRIVE_SHARED_DRIVE_ID: ${GDRIVE_SHARED_DRIVE_ID:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?set GEMINI_API_KEY}
+      GDRIVE_RAG_BEARER_TOKEN: ${GDRIVE_RAG_BEARER_TOKEN:?set GDRIVE_RAG_BEARER_TOKEN}
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/google-service-account.json
+      GDRIVE_RAG_DB_PATH: /data/index.db
+      GDRIVE_RAG_HOST: 0.0.0.0
+      GDRIVE_RAG_PORT: 8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - index-data:/data
+      - ./secrets/service-account.json:/run/secrets/google-service-account.json:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  index-data:
