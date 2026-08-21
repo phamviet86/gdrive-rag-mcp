@@ -20,6 +20,5 @@ outputs/
 *.db-wal
 credentials*.json
 client_secret*.json
-service-account*.json
 token*.json
 oauth*.json

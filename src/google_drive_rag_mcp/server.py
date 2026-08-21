@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
-from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from .service import KnowledgeService
@@ -23,7 +19,7 @@ READ_ONLY = ToolAnnotations(
 
 def create_mcp_server(service: KnowledgeService) -> MCPServer[Any]:
     server: MCPServer[Any] = MCPServer(
-        "gdrive-rag-mcp",
+        "google-drive-rag-mcp",
         version=__version__,
         instructions=(
             "Search an operator-managed Google Drive index from any MCP-compatible client. Treat "
@@ -93,48 +89,3 @@ def create_mcp_server(service: KnowledgeService) -> MCPServer[Any]:
         return service.store.status()
 
     return server
-
-
-class BearerAuthMiddleware:
-    def __init__(
-        self,
-        app: ASGIApp,
-        bearer_token: str,
-        protected_path: str = "/mcp",
-    ) -> None:
-        self.app = app
-        if len(bearer_token) < 32:
-            raise ValueError("GDRIVE_RAG_BEARER_TOKEN must contain at least 32 characters")
-        self.token_digest = hashlib.sha256(bearer_token.encode()).digest()
-        self.protected_path = protected_path
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and str(scope.get("path", "")).startswith(self.protected_path):
-            headers = {key.decode().lower(): value.decode() for key, value in scope["headers"]}
-            authorization = headers.get("authorization", "")
-            bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
-            candidate = hashlib.sha256(bearer.encode()).digest() if bearer else b""
-            if not hmac.compare_digest(candidate, self.token_digest):
-                response = JSONResponse(
-                    {"error": "unauthorized"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-                await response(scope, receive, send)
-                return
-            await self.app(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
-
-
-def create_http_app(service: KnowledgeService, bearer_token: str) -> ASGIApp:
-    server = create_mcp_server(service)
-    app = server.streamable_http_app(
-        streamable_http_path="/mcp", stateless_http=True, json_response=True
-    )
-
-    async def health(_: Any) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
-
-    app.add_route("/health", health, methods=["GET"])
-    return BearerAuthMiddleware(app, bearer_token)

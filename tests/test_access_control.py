@@ -3,10 +3,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from gdrive_rag_mcp.embeddings import HashingEmbedder
-from gdrive_rag_mcp.models import SourceDocument
-from gdrive_rag_mcp.retrieval import HybridRetriever
-from gdrive_rag_mcp.storage import SQLiteStore
+from google_drive_rag_mcp.embeddings import HashingEmbedder
+from google_drive_rag_mcp.models import SourceDocument
+from google_drive_rag_mcp.retrieval import HybridRetriever
+from google_drive_rag_mcp.storage import SQLiteStore
 
 
 def add_scoped(

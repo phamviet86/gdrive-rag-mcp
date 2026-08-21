@@ -5,64 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from gdrive_rag_mcp.server import BearerAuthMiddleware, create_http_app, create_mcp_server
-
-
-async def noop_app(scope: object, receive: object, send: object) -> None:
-    raise AssertionError("Unauthenticated requests must not reach the application")
-
-
-def test_bearer_token_must_be_long() -> None:
-    with pytest.raises(ValueError, match="32"):
-        create_http_app(object(), "short")  # type: ignore[arg-type]
-
-
-@pytest.mark.anyio
-async def test_bearer_middleware_rejects_missing_token() -> None:
-    messages: list[dict[str, object]] = []
-
-    async def receive() -> dict[str, object]:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    async def send(message: dict[str, object]) -> None:
-        messages.append(message)
-
-    middleware = BearerAuthMiddleware(noop_app, "x" * 32)
-    await middleware(
-        {"type": "http", "method": "POST", "path": "/mcp", "headers": []},  # type: ignore[arg-type]
-        receive,  # type: ignore[arg-type]
-        send,  # type: ignore[arg-type]
-    )
-    assert messages[0]["status"] == 401
-
-
-@pytest.mark.anyio
-async def test_bearer_middleware_accepts_the_shared_service_token() -> None:
-    observed: list[bool] = []
-
-    async def app(scope: object, receive: object, send: object) -> None:
-        observed.append(True)
-
-    async def receive() -> dict[str, object]:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    async def send(message: dict[str, object]) -> None:
-        pass
-
-    token = "x" * 32
-    middleware = BearerAuthMiddleware(app, token)  # type: ignore[arg-type]
-    await middleware(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/mcp",
-            "headers": [(b"authorization", f"Bearer {token}".encode())],
-        },  # type: ignore[arg-type]
-        receive,  # type: ignore[arg-type]
-        send,  # type: ignore[arg-type]
-    )
-
-    assert observed == [True]
+from google_drive_rag_mcp import cli
+from google_drive_rag_mcp.drive import _validate_client_secret_file
+from google_drive_rag_mcp.server import create_mcp_server
 
 
 def test_sample_configuration_contains_placeholders_only() -> None:
@@ -72,15 +17,66 @@ def test_sample_configuration_contains_placeholders_only() -> None:
     assert "/Users/" not in sample
     assert "your_gemini_api_key" in sample
     assert "your_embedding_api_key" in sample
+    assert "google-drive-rag-mcp-auth --client-secret" in sample
     ignore = Path(".gitignore").read_text(encoding="utf-8")
     for pattern in (
         ".env",
         "token*.json",
-        "service-account*.json",
         "secrets/",
         "*.db",
     ):
         assert pattern in ignore
+
+
+def test_client_secret_requires_desktop_installed_shape(tmp_path: Path) -> None:
+    valid = tmp_path / "client_secret.json"
+    valid.write_text(
+        '{"installed":{"client_id":"example.apps.googleusercontent.com","client_secret":"secret"}}',
+        encoding="utf-8",
+    )
+    _validate_client_secret_file(valid)
+
+    for payload in (
+        '{"web":{"client_id":"example","client_secret":"secret"}}',
+        '{"unexpected":{"client_id":"example","client_secret":"secret"}}',
+    ):
+        invalid = tmp_path / "invalid.json"
+        invalid.write_text(payload, encoding="utf-8")
+        with pytest.raises(ValueError, match="OAuth Desktop"):
+            _validate_client_secret_file(invalid)
+
+
+def test_serve_always_uses_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[str] = []
+    settings = object()
+
+    class FakeService:
+        def __init__(self, configured_settings: object) -> None:
+            assert configured_settings is settings
+
+        def require_index_ready(self) -> None:
+            observed.append("ready")
+
+    class FakeServer:
+        def run(self, *, transport: str) -> None:
+            observed.append(transport)
+
+    monkeypatch.setattr(cli.Settings, "from_env", lambda: settings)
+    monkeypatch.setattr(cli, "KnowledgeService", FakeService)
+    monkeypatch.setattr(cli, "create_mcp_server", lambda service: FakeServer())
+
+    cli.serve()
+
+    assert observed == ["ready", "stdio"]
+
+
+def test_default_command_runs_stdio_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[bool] = []
+    monkeypatch.setattr(cli, "serve", lambda: observed.append(True))
+
+    cli.main(SimpleNamespace(invoked_subcommand=None))  # type: ignore[arg-type]
+
+    assert observed == [True]
 
 
 @pytest.mark.anyio

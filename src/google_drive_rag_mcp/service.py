@@ -22,12 +22,12 @@ class KnowledgeService:
 
     def require_index_ready(self) -> None:
         if not self.settings.folder_id:
-            raise ValueError("GDRIVE_FOLDER_ID is required to serve the shared index")
+            raise ValueError("GOOGLE_DRIVE_FOLDER_ID is required to serve the shared index")
         indexed_root = self.store.get_state("drive_root_folder_id")
         if indexed_root != self.settings.folder_id:
             raise ValueError(
-                "The configured GDRIVE_FOLDER_ID does not match the indexed root. "
-                "Run `gdrive-rag-mcp sync --full` before serving."
+                "The configured GOOGLE_DRIVE_FOLDER_ID does not match the indexed root. "
+                "Run `google-drive-rag-mcp sync --full` before serving."
             )
 
     def sync(self) -> dict[str, object]:

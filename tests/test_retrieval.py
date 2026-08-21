@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from gdrive_rag_mcp.embeddings import HashingEmbedder
-from gdrive_rag_mcp.models import SourceDocument
-from gdrive_rag_mcp.retrieval import HybridRetriever
-from gdrive_rag_mcp.storage import SQLiteStore
+from google_drive_rag_mcp.embeddings import HashingEmbedder
+from google_drive_rag_mcp.models import SourceDocument
+from google_drive_rag_mcp.retrieval import HybridRetriever
+from google_drive_rag_mcp.storage import SQLiteStore
 
 
 def add(store: SQLiteStore, embedder: HashingEmbedder, doc_id: str, text: str) -> None:

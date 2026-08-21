@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gdrive_rag_mcp.embeddings import HashingEmbedder
-from gdrive_rag_mcp.indexer import Indexer
-from gdrive_rag_mcp.models import DriveChangeBatch, SourceDocument
-from gdrive_rag_mcp.storage import SQLiteStore
+from google_drive_rag_mcp.embeddings import HashingEmbedder
+from google_drive_rag_mcp.indexer import Indexer
+from google_drive_rag_mcp.models import DriveChangeBatch, SourceDocument
+from google_drive_rag_mcp.storage import SQLiteStore
 
 
 class FakeSource:

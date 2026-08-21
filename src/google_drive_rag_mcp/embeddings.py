@@ -186,7 +186,7 @@ class SentenceTransformersEmbedder:
         except ImportError as error:
             raise RuntimeError(
                 "Sentence Transformers provider requires the optional dependency: "
-                "pip install 'gdrive-rag-mcp[sentence-transformers]'"
+                "pip install 'google-drive-rag-mcp[sentence-transformers]'"
             ) from error
         self.model = SentenceTransformer(model, device=device or None)
         self.dimensions = dimensions

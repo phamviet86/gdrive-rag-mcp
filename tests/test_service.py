@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gdrive_rag_mcp.service import KnowledgeService
+from google_drive_rag_mcp.service import KnowledgeService
 
 
 def test_sync_forces_full_reconciliation_when_drive_root_changes() -> None:

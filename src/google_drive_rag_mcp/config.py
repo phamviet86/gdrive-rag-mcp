@@ -34,13 +34,15 @@ def _provider(value: str) -> str:
     normalized = value.strip().casefold().replace("_", "-")
     if normalized not in SUPPORTED_EMBED_PROVIDERS:
         choices = ", ".join(sorted(SUPPORTED_EMBED_PROVIDERS))
-        raise ValueError(f"GDRIVE_RAG_EMBED_PROVIDER must be one of: {choices}")
+        raise ValueError(f"GOOGLE_DRIVE_RAG_EMBED_PROVIDER must be one of: {choices}")
     return normalized
 
 
 def _profile_path(profile: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", profile):
-        raise ValueError("GDRIVE_RAG_INDEX_PROFILE may contain only letters, numbers, ., _, and -")
+        raise ValueError(
+            "GOOGLE_DRIVE_RAG_INDEX_PROFILE may contain only letters, numbers, ., _, and -"
+        )
     return Path("data/index.db" if profile == "default" else f"data/index-{profile}.db")
 
 
@@ -64,56 +66,45 @@ class Settings:
     chunk_size: int = 700
     chunk_overlap: int = 100
     evidence_threshold: float = 0.35
-    service_account_file: Path | None = None
-    oauth_client_file: Path | None = None
-    oauth_token_file: Path = Path("data/google-oauth-token.json")
-    bearer_token: str = ""
-    host: str = "127.0.0.1"
-    port: int = 8000
+    token_file: Path = Path.home() / ".config/google-drive-rag-mcp/token.json"
 
     @classmethod
     def from_env(cls) -> Settings:
-        def path_or_none(name: str) -> Path | None:
-            value = os.getenv(name)
-            return Path(value) if value else None
-
-        provider = _provider(os.getenv("GDRIVE_RAG_EMBED_PROVIDER", "gemini"))
+        provider = _provider(os.getenv("GOOGLE_DRIVE_RAG_EMBED_PROVIDER", "gemini"))
         default_key_env = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
-        profile = os.getenv("GDRIVE_RAG_INDEX_PROFILE", "default")
+        profile = os.getenv("GOOGLE_DRIVE_RAG_INDEX_PROFILE", "default")
         db_path = (
-            Path(os.environ["GDRIVE_RAG_DB_PATH"])
-            if "GDRIVE_RAG_DB_PATH" in os.environ
+            Path(os.environ["GOOGLE_DRIVE_RAG_DB_PATH"])
+            if "GOOGLE_DRIVE_RAG_DB_PATH" in os.environ
             else _profile_path(profile)
         )
         settings = cls(
-            folder_id=os.getenv("GDRIVE_FOLDER_ID", ""),
-            shared_drive_id=os.getenv("GDRIVE_SHARED_DRIVE_ID") or None,
+            folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
+            shared_drive_id=os.getenv("GOOGLE_DRIVE_SHARED_DRIVE_ID") or None,
             db_path=db_path,
             index_profile=profile,
             embed_provider=provider,
-            embed_model=os.getenv("GDRIVE_RAG_EMBED_MODEL", "gemini-embedding-001"),
-            embed_dimensions=_int("GDRIVE_RAG_EMBED_DIMENSIONS", 768),
+            embed_model=os.getenv("GOOGLE_DRIVE_RAG_EMBED_MODEL", "gemini-embedding-001"),
+            embed_dimensions=_int("GOOGLE_DRIVE_RAG_EMBED_DIMENSIONS", 768),
             embed_base_url=os.getenv(
-                "GDRIVE_RAG_EMBED_BASE_URL", "https://api.openai.com/v1"
+                "GOOGLE_DRIVE_RAG_EMBED_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),
-            embed_api_key_env=os.getenv("GDRIVE_RAG_EMBED_API_KEY_ENV", default_key_env),
-            embed_batch_size=_int("GDRIVE_RAG_EMBED_BATCH_SIZE", 32),
-            embed_timeout_seconds=_float("GDRIVE_RAG_EMBED_TIMEOUT_SECONDS", 60.0),
-            embed_send_dimensions=_bool("GDRIVE_RAG_EMBED_SEND_DIMENSIONS", True),
-            embed_query_input_type=os.getenv("GDRIVE_RAG_EMBED_QUERY_INPUT_TYPE", ""),
-            embed_document_input_type=os.getenv("GDRIVE_RAG_EMBED_DOCUMENT_INPUT_TYPE", ""),
-            embed_device=os.getenv("GDRIVE_RAG_EMBED_DEVICE", ""),
-            chunk_size=_int("GDRIVE_RAG_CHUNK_SIZE", 700),
-            chunk_overlap=_int("GDRIVE_RAG_CHUNK_OVERLAP", 100),
-            evidence_threshold=_float("GDRIVE_RAG_EVIDENCE_THRESHOLD", 0.35),
-            service_account_file=path_or_none("GOOGLE_SERVICE_ACCOUNT_FILE"),
-            oauth_client_file=path_or_none("GOOGLE_OAUTH_CLIENT_FILE"),
-            oauth_token_file=Path(
-                os.getenv("GOOGLE_OAUTH_TOKEN_FILE", "data/google-oauth-token.json")
+            embed_api_key_env=os.getenv("GOOGLE_DRIVE_RAG_EMBED_API_KEY_ENV", default_key_env),
+            embed_batch_size=_int("GOOGLE_DRIVE_RAG_EMBED_BATCH_SIZE", 32),
+            embed_timeout_seconds=_float("GOOGLE_DRIVE_RAG_EMBED_TIMEOUT_SECONDS", 60.0),
+            embed_send_dimensions=_bool("GOOGLE_DRIVE_RAG_EMBED_SEND_DIMENSIONS", True),
+            embed_query_input_type=os.getenv("GOOGLE_DRIVE_RAG_EMBED_QUERY_INPUT_TYPE", ""),
+            embed_document_input_type=os.getenv("GOOGLE_DRIVE_RAG_EMBED_DOCUMENT_INPUT_TYPE", ""),
+            embed_device=os.getenv("GOOGLE_DRIVE_RAG_EMBED_DEVICE", ""),
+            chunk_size=_int("GOOGLE_DRIVE_RAG_CHUNK_SIZE", 700),
+            chunk_overlap=_int("GOOGLE_DRIVE_RAG_CHUNK_OVERLAP", 100),
+            evidence_threshold=_float("GOOGLE_DRIVE_RAG_EVIDENCE_THRESHOLD", 0.35),
+            token_file=Path(
+                os.getenv(
+                    "GOOGLE_TOKEN_FILE",
+                    str(Path.home() / ".config/google-drive-rag-mcp/token.json"),
+                )
             ),
-            bearer_token=os.getenv("GDRIVE_RAG_BEARER_TOKEN", ""),
-            host=os.getenv("GDRIVE_RAG_HOST", "127.0.0.1"),
-            port=_int("GDRIVE_RAG_PORT", 8000),
         )
         settings.validate_embedding()
         return settings
@@ -121,28 +112,30 @@ class Settings:
     def validate_embedding(self) -> None:
         _provider(self.embed_provider)
         if not self.embed_model.strip():
-            raise ValueError("GDRIVE_RAG_EMBED_MODEL must not be empty")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_MODEL must not be empty")
         if self.embed_dimensions <= 0:
-            raise ValueError("GDRIVE_RAG_EMBED_DIMENSIONS must be positive")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_DIMENSIONS must be positive")
         if self.embed_batch_size <= 0:
-            raise ValueError("GDRIVE_RAG_EMBED_BATCH_SIZE must be positive")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_BATCH_SIZE must be positive")
         if self.embed_timeout_seconds <= 0:
-            raise ValueError("GDRIVE_RAG_EMBED_TIMEOUT_SECONDS must be positive")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_TIMEOUT_SECONDS must be positive")
         if self.embed_provider == "openai-compatible" and not self.embed_base_url:
-            raise ValueError("GDRIVE_RAG_EMBED_BASE_URL is required for openai-compatible")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_BASE_URL is required for openai-compatible")
         parsed_url = urlsplit(self.embed_base_url)
         if self.embed_provider == "openai-compatible" and (
             parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc
         ):
-            raise ValueError("GDRIVE_RAG_EMBED_BASE_URL must be an HTTP(S) API base URL")
+            raise ValueError("GOOGLE_DRIVE_RAG_EMBED_BASE_URL must be an HTTP(S) API base URL")
         if parsed_url.username or parsed_url.password:
-            raise ValueError("Do not put credentials in GDRIVE_RAG_EMBED_BASE_URL")
+            raise ValueError("Do not put credentials in GOOGLE_DRIVE_RAG_EMBED_BASE_URL")
         if self.embed_provider == "openai-compatible" and (parsed_url.query or parsed_url.fragment):
             raise ValueError(
-                "GDRIVE_RAG_EMBED_BASE_URL must not contain a query string or fragment"
+                "GOOGLE_DRIVE_RAG_EMBED_BASE_URL must not contain a query string or fragment"
             )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.embed_api_key_env):
-            raise ValueError("GDRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name")
+            raise ValueError(
+                "GOOGLE_DRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name"
+            )
         _profile_path(self.index_profile)
 
     def embedding_api_key(self, required: bool) -> str:
@@ -167,12 +160,10 @@ class Settings:
     def require_sync(self) -> None:
         missing = []
         if not self.folder_id:
-            missing.append("GDRIVE_FOLDER_ID")
+            missing.append("GOOGLE_DRIVE_FOLDER_ID")
         if self.embed_provider == "gemini" and not os.getenv(self.embed_api_key_env):
             missing.append(self.embed_api_key_env)
-        if not (
-            self.service_account_file or self.oauth_client_file or self.oauth_token_file.exists()
-        ):
-            missing.append("Google service-account or OAuth credentials")
+        if not self.token_file.exists():
+            missing.append("Google OAuth token; run google-drive-rag-mcp-auth --client-secret FILE")
         if missing:
             raise ValueError("Missing sync configuration: " + ", ".join(missing))

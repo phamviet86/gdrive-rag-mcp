@@ -161,8 +161,9 @@ class SQLiteStore:
             if chunk_count and self.enforce_identity:
                 raise ReindexRequiredError(
                     "This legacy index contains vectors but no embedding identity, so their model "
-                    "cannot be safely inferred. Run `gdrive-rag-mcp reindex --yes` to rebuild it, "
-                    "or set GDRIVE_RAG_DB_PATH/GDRIVE_RAG_INDEX_PROFILE to a new index."
+                    "cannot be safely inferred. Run `google-drive-rag-mcp reindex --yes` to "
+                    "rebuild it, "
+                    "or set GOOGLE_DRIVE_RAG_DB_PATH/GOOGLE_DRIVE_RAG_INDEX_PROFILE to a new index."
                 )
             if not chunk_count:
                 if self.vector_extension:
@@ -175,7 +176,7 @@ class SQLiteStore:
             raise ReindexRequiredError(
                 "Embedding configuration does not match this index. "
                 f"Stored={stored}; configured={expected}. "
-                "Run `gdrive-rag-mcp reindex --yes` or select a different database/profile."
+                "Run `google-drive-rag-mcp reindex --yes` or select a different database/profile."
             )
 
     @staticmethod

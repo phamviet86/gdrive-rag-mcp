@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import json
 import time
-from enum import StrEnum
+from pathlib import Path
 from typing import Annotated
 
 import typer
-import uvicorn
 
 from .config import Settings
 from .drive import run_oauth
-from .server import create_http_app, create_mcp_server
+from .server import create_mcp_server
 from .service import KnowledgeService
 from .storage import SQLiteStore
 
-app = typer.Typer(no_args_is_help=True, help="Google Drive hybrid retrieval MCP server")
+app = typer.Typer(
+    invoke_without_command=True,
+    help="Google Drive hybrid retrieval MCP server",
+)
 
 
-class Transport(StrEnum):
-    stdio = "stdio"
-    http = "http"
+@app.callback()
+def main(ctx: typer.Context) -> None:
+    """Run the stdio server by default; use a subcommand for index maintenance."""
+    if ctx.invoked_subcommand is None:
+        serve()
 
 
 @app.command("init-db")
@@ -96,25 +100,41 @@ def reindex(
 
 
 @app.command("auth-google")
-def auth_google() -> None:
+def auth_google(
+    client_secret: Annotated[
+        Path,
+        typer.Option(
+            "--client-secret",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+            help="Google OAuth Desktop client_secret.json file.",
+        ),
+    ],
+) -> None:
     """Run installed-app OAuth and store the refresh token at the configured ignored path."""
-    path = run_oauth(Settings.from_env())
+    try:
+        path = run_oauth(Settings.from_env(), client_secret)
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="--client-secret") from error
     typer.echo(f"OAuth token stored with user-only permissions at {path}")
 
 
+def auth_google_cli() -> None:
+    """Expose the same authentication syntax through the dedicated console command."""
+    typer.run(auth_google)
+
+
 @app.command()
-def serve(
-    transport: Annotated[Transport, typer.Option(case_sensitive=False)] = Transport.stdio,
-) -> None:
-    """Run MCP over local stdio or authenticated Streamable HTTP."""
+def serve() -> None:
+    """Run the local MCP server over stdio."""
     settings = Settings.from_env()
     service = KnowledgeService(settings)
     service.require_index_ready()
-    if transport is Transport.stdio:
-        create_mcp_server(service).run(transport="stdio")
-        return
-    http_app = create_http_app(service, settings.bearer_token)
-    uvicorn.run(http_app, host=settings.host, port=settings.port)
+    typer.echo("google-drive-rag-mcp running on stdio", err=True)
+    create_mcp_server(service).run(transport="stdio")
 
 
 if __name__ == "__main__":

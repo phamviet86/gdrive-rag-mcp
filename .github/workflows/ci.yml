@@ -24,7 +24,7 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: ruff format --check .
       - run: ruff check .
-      - run: mypy src/gdrive_rag_mcp
+      - run: mypy src/google_drive_rag_mcp
       - run: pytest
       - name: Resolve optional Sentence Transformers extra without installing heavy runtime
         if: matrix.python-version == '3.12'

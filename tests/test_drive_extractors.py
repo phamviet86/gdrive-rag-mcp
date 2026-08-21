@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from openpyxl import Workbook
 
-from gdrive_rag_mcp.drive import GOOGLE_SHEET, GoogleDriveSource
+from google_drive_rag_mcp.drive import GOOGLE_SHEET, GoogleDriveSource
 
 
 def test_google_sheet_is_rendered_with_sheet_names_and_tabular_values() -> None:

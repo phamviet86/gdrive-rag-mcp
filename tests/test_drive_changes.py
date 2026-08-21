@@ -3,8 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from gdrive_rag_mcp.drive import FOLDER_MIME, GoogleDriveSource
-from gdrive_rag_mcp.models import SourceDocument
+from google_drive_rag_mcp.drive import FOLDER_MIME, GoogleDriveSource
+from google_drive_rag_mcp.models import SourceDocument
 
 
 class Request:

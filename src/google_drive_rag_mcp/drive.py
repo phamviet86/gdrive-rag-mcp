@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -9,7 +10,6 @@ from typing import Any, cast
 from docx import Document
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -29,30 +29,50 @@ TEXT_MIMES = {"text/plain", "text/markdown", "text/x-markdown"}
 SUPPORTED_MIMES = {GOOGLE_DOC, GOOGLE_SHEET, PDF, DOCX, *TEXT_MIMES}
 
 
-def google_credentials(settings: Settings, interactive: bool = False) -> Any:
-    if settings.service_account_file:
-        return ServiceAccountCredentials.from_service_account_file(  # type: ignore[no-untyped-call]
-            str(settings.service_account_file), scopes=SCOPES
+def _validate_client_secret_file(path: Path) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"Cannot read Google OAuth Desktop client JSON at {path}: {error}"
+        ) from error
+    installed = payload.get("installed") if isinstance(payload, dict) else None
+    if (
+        not isinstance(installed, dict)
+        or not installed.get("client_id")
+        or not installed.get("client_secret")
+    ):
+        raise ValueError(
+            "--client-secret must point to a Google OAuth Desktop client JSON containing "
+            "'installed', 'client_id', and 'client_secret'"
         )
+
+
+def google_credentials(
+    settings: Settings,
+    interactive: bool = False,
+    client_secret_file: Path | None = None,
+) -> Any:
     credentials: Credentials | None = None
-    if settings.oauth_token_file.exists():
+    if settings.token_file.exists():
         credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
-            str(settings.oauth_token_file), SCOPES
+            str(settings.token_file), SCOPES
         )
     if credentials and credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())  # type: ignore[no-untyped-call]
     if credentials and credentials.valid:
         return credentials
-    if not interactive or not settings.oauth_client_file:
+    if not interactive or client_secret_file is None:
         raise ValueError(
-            "Valid Google credentials not found. Configure a service account or run "
-            "`gdrive-rag-mcp auth-google`."
+            "Valid Google OAuth credentials not found. Run "
+            "`google-drive-rag-mcp-auth --client-secret /path/to/client_secret.json`."
         )
-    flow = InstalledAppFlow.from_client_secrets_file(str(settings.oauth_client_file), SCOPES)
+    _validate_client_secret_file(client_secret_file)
+    flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_file), SCOPES)
     credentials = flow.run_local_server(port=0)
-    settings.oauth_token_file.parent.mkdir(parents=True, exist_ok=True)
-    settings.oauth_token_file.write_text(credentials.to_json(), encoding="utf-8")
-    settings.oauth_token_file.chmod(0o600)
+    settings.token_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    settings.token_file.write_text(credentials.to_json(), encoding="utf-8")
+    settings.token_file.chmod(0o600)
     return credentials
 
 
@@ -302,6 +322,6 @@ class GoogleDriveSource:
         )
 
 
-def run_oauth(settings: Settings) -> Path:
-    google_credentials(settings, interactive=True)
-    return settings.oauth_token_file
+def run_oauth(settings: Settings, client_secret_file: Path) -> Path:
+    google_credentials(settings, interactive=True, client_secret_file=client_secret_file)
+    return settings.token_file

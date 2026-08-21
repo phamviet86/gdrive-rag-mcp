@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from gdrive_rag_mcp.embeddings import EmbeddingIdentity, HashingEmbedder
-from gdrive_rag_mcp.models import SourceDocument
-from gdrive_rag_mcp.storage import ReindexRequiredError, SQLiteStore
+from google_drive_rag_mcp.embeddings import EmbeddingIdentity, HashingEmbedder
+from google_drive_rag_mcp.models import SourceDocument
+from google_drive_rag_mcp.storage import ReindexRequiredError, SQLiteStore
 
 
 def source_document() -> SourceDocument:

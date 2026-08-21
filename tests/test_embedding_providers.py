@@ -6,8 +6,8 @@ from typing import Any
 import httpx
 import pytest
 
-from gdrive_rag_mcp.config import Settings
-from gdrive_rag_mcp.embeddings import (
+from google_drive_rag_mcp.config import Settings
+from google_drive_rag_mcp.embeddings import (
     GeminiEmbedder,
     OpenAICompatibleEmbedder,
     SentenceTransformersEmbedder,
@@ -15,14 +15,14 @@ from gdrive_rag_mcp.embeddings import (
 )
 
 
-def test_backward_compatible_environment_defaults_to_gemini(
+def test_environment_defaults_to_gemini(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
-        "GDRIVE_RAG_EMBED_PROVIDER",
-        "GDRIVE_RAG_EMBED_MODEL",
-        "GDRIVE_RAG_EMBED_DIMENSIONS",
-        "GDRIVE_RAG_EMBED_API_KEY_ENV",
+        "GOOGLE_DRIVE_RAG_EMBED_PROVIDER",
+        "GOOGLE_DRIVE_RAG_EMBED_MODEL",
+        "GOOGLE_DRIVE_RAG_EMBED_DIMENSIONS",
+        "GOOGLE_DRIVE_RAG_EMBED_API_KEY_ENV",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-placeholder")
@@ -57,8 +57,8 @@ def test_provider_configuration_validation() -> None:
 
 
 def test_named_profile_derives_separate_database_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GDRIVE_RAG_INDEX_PROFILE", "local-multilingual")
-    monkeypatch.delenv("GDRIVE_RAG_DB_PATH", raising=False)
+    monkeypatch.setenv("GOOGLE_DRIVE_RAG_INDEX_PROFILE", "local-multilingual")
+    monkeypatch.delenv("GOOGLE_DRIVE_RAG_DB_PATH", raising=False)
     settings = Settings.from_env()
     assert settings.db_path.as_posix() == "data/index-local-multilingual.db"
 
