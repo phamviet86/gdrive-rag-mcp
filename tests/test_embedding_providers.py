@@ -81,6 +81,7 @@ def test_openai_compatible_contract_batches_normalizes_and_sends_dimensions() ->
         base_url="https://embeddings.example.test/v1",
         api_key="test-placeholder",
         batch_size=2,
+        document_input_type="search_document",
         transport=httpx.MockTransport(handler),
     )
 
@@ -88,6 +89,7 @@ def test_openai_compatible_contract_batches_normalizes_and_sends_dimensions() ->
 
     assert len(requests) == 2
     assert all(request["dimensions"] == 3 for request in requests)
+    assert all(request["input_type"] == "search_document" for request in requests)
     assert vectors == [[0.6, 0.8, 0.0]] * 3
 
 

@@ -3,10 +3,10 @@
 [![CI](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local-first Google Drive hybrid index exposed through the Model Context Protocol (MCP). Choose an
-embedding provider and model that fit your languages, privacy boundary, and infrastructure; then
-query the same durable index from Codex, Hermes Agent, or any standards-compliant MCP client. The
-index is not tied to the agent that queries it.
+A local-first, scope-aware Google Drive hybrid index exposed through the Model Context Protocol
+(MCP). Choose an embedding provider and model that fit your languages, privacy boundary, and
+infrastructure; then query one durable index from multiple Hermes profiles or other MCP clients
+without granting every caller access to every document.
 
 Google Drive/Workspace remains the read-only source of truth. The service stores extracted chunks,
 normalized embeddings, metadata, checksums, sync state, and index data—not downloaded source files.
@@ -19,37 +19,43 @@ It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking b
 ## What the MVP does
 
 - Recursively reads one configured Drive folder or Shared Drive scope with the read-only API.
+- Derives `owner_profile_id`, `business_function`, and PARA category from the Drive folder path.
+- Authenticates the caller before tool execution and filters both FTS5 and vector candidates before
+  ranking. A profile cannot widen its scope with tool arguments.
 - Extracts Google Docs, Google Sheets, text/Markdown, text-based PDFs, and DOCX.
 - Supports Gemini, any verified OpenAI-compatible `/embeddings` endpoint, and optional local
   Sentence Transformers behind one embedding protocol.
 - Combines Unicode-safe SQLite FTS5 keyword search with sqlite-vec cosine search. A tested Python
   cosine fallback is used when the extension cannot load.
-- Reindexes changed files and removes deleted or out-of-scope files on later syncs.
+- Uses the Drive Changes API after an initial full scan, removes deleted/out-of-scope files, and
+  periodically supports a complete reconciliation for moves and manually added content.
 - Prevents vectors from different providers, models, endpoints, or dimensions from sharing an
   index by recording and validating an embedding fingerprint.
 - Returns citations, source modified/indexed times, and a conservative evidence decision.
-- Exposes the same read-only tools over local stdio and bearer-protected Streamable HTTP.
+- Exposes the same read-only tools over profile-scoped stdio and bearer-protected Streamable HTTP.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    D[Selected Google Drive scope] -->|read-only Drive API| X[Format extractors]
-    X --> L[LlamaIndex chunking boundary]
+    D[Selected Google Drive scope] -->|read-only Drive API + change feed| X[Path classifier]
+    X -->|owner / function / PARA| Y[Format extractors]
+    Y --> L[LlamaIndex chunking boundary]
     L --> E{Embedding provider}
     E -->|Gemini| V[Normalized vectors]
     E -->|OpenAI-compatible HTTP| V
     E -->|Local Sentence Transformers| V
     L --> S[(SQLite documents + FTS5)]
     V --> Q[(sqlite-vec / cosine fallback)]
-    S --> R[Hybrid ranking + evidence gate]
+    S --> R[Authorized pre-filter]
     Q --> R
-    R --> M[Agent-neutral MCP tools]
+    R --> H[Hybrid ranking + evidence gate]
+    H --> M[Agent-neutral MCP tools]
     M --> A[Any compatible MCP client]
 ```
 
 Google, embedding-provider, and local-model credentials/resources stay with the service operator.
-Remote clients receive only an MCP URL and bearer token.
+Remote clients receive only an MCP URL and a profile-specific bearer token.
 
 ## Embedding providers
 
@@ -128,6 +134,25 @@ put credentials in the base URL. Set `GDRIVE_RAG_EMBED_SEND_DIMENSIONS=false` on
 endpoint/model does not accept that optional field; the configured output dimension is still
 validated on every response.
 
+OpenRouter exposes the same `/embeddings` contract. This example uses Qwen3 Embedding 8B at its
+full 4096 dimensions and sends distinct query/document input types:
+
+```bash
+export GDRIVE_RAG_EMBED_PROVIDER=openai-compatible
+export GDRIVE_RAG_EMBED_MODEL=qwen/qwen3-embedding-8b
+export GDRIVE_RAG_EMBED_DIMENSIONS=4096
+export GDRIVE_RAG_EMBED_BASE_URL=https://openrouter.ai/api/v1
+export GDRIVE_RAG_EMBED_API_KEY_ENV=OPENROUTER_API_KEY
+export OPENROUTER_API_KEY=your_runtime_secret
+export GDRIVE_RAG_EMBED_QUERY_INPUT_TYPE=search_query
+export GDRIVE_RAG_EMBED_DOCUMENT_INPUT_TYPE=search_document
+```
+
+Free OpenRouter endpoints may log or retain inputs. Do not send confidential Drive content to a
+free endpoint unless its current data policy has been reviewed and explicitly accepted. Use a
+suitable paid route with data collection denied or a local Sentence Transformers model when the
+corpus must remain private.
+
 ### Local Sentence Transformers
 
 ```bash
@@ -175,6 +200,56 @@ The Drive API has no OAuth scope meaning “read only this existing folder.” T
 files the user can read; the indexer enforces the configured folder during traversal. See Google's
 [Drive authorization guide](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
 
+## Drive layout and document scopes
+
+The default `profile-business-para` layout treats the first three folders below
+`GDRIVE_FOLDER_ID` as authorization metadata:
+
+```text
+<configured-root>/
+└── <owner-profile-id>/
+    └── <business-function>/
+        ├── projects/
+        ├── areas/
+        ├── resources/
+        └── archives/
+```
+
+Two-digit ordering prefixes are accepted, so `01-orchestrator/02-finance/03-resources/file.md`
+becomes owner `orchestrator`, function `finance`, and PARA category `resources`. Files above the
+third level or under an invalid PARA folder are not indexed and increment `scope_skipped` in the
+sync report. This fail-closed rule prevents accidentally unclassified documents from becoming
+globally searchable.
+
+Use `GDRIVE_RAG_SCOPE_LAYOUT=flat` only for a deliberately shared, unpartitioned corpus. Flat mode
+classifies every file as `shared/general/resources`.
+
+Each stdio process has one immutable caller identity:
+
+```bash
+export GDRIVE_RAG_PROFILE_ID=finance
+export GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS=self,shared
+export GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS=finance
+export GDRIVE_RAG_ALLOWED_PARA_CATEGORIES=projects,areas,resources,archives
+```
+
+`self` resolves to `GDRIVE_RAG_PROFILE_ID`. Leave a search filter empty to search all values that
+the caller is allowed to use. A requested owner, function, or PARA value outside that scope is
+rejected rather than silently widened.
+
+For HTTP with multiple profiles, copy `access-policy.example.json` to an operator-only location.
+The policy contains token environment-variable names, never token values:
+
+```bash
+cp access-policy.example.json ./secrets/access-policy.json
+export GDRIVE_RAG_ACCESS_POLICY_FILE=./secrets/access-policy.json
+export GDRIVE_RAG_TOKEN_ORCHESTRATOR="$(openssl rand -hex 32)"
+export GDRIVE_RAG_TOKEN_FINANCE="$(openssl rand -hex 32)"
+```
+
+The server authenticates the bearer token and derives the profile scope before invoking an MCP
+tool. Do not accept a caller-supplied profile ID as identity.
+
 ## Build, refresh, and migrate an index
 
 ```bash
@@ -183,8 +258,19 @@ gdrive-rag-mcp sync
 gdrive-rag-mcp status
 ```
 
-Run `sync` periodically. It scans the selected tree, avoids rechunking/re-embedding unchanged
-checksums, reindexes a changed whole file, deletes stale records, and records `completed_at`.
+The first `sync` performs a full tree reconciliation and records a Drive start-page token. Later
+runs consume the Drive Changes API, avoid re-embedding unchanged files, and remove deleted,
+inaccessible, moved-out, or newly unclassified files. A folder change triggers a full
+reconciliation because it can change the scope of every descendant.
+
+Run a durable polling worker on the VPS:
+
+```bash
+gdrive-rag-mcp sync-loop --interval-seconds 300 --full-interval-seconds 86400
+```
+
+The change feed provides frequent updates; the daily full pass reconciles manual additions and
+scope/path changes. Operators can force one immediately with `gdrive-rag-mcp sync --full`.
 
 ### Embedding fingerprint and legacy indexes
 
@@ -202,6 +288,10 @@ gdrive-rag-mcp reindex --yes
 The command deletes only generated index data in the selected database and performs a full Drive
 sync. It does not modify Drive. An empty legacy database is stamped automatically.
 
+Version 0.3 adds scope columns to existing databases automatically. Existing rows initially have
+empty scope values and are invisible to scoped callers. Run `gdrive-rag-mcp sync --full` after an
+upgrade so every current Drive path is classified before serving profiles.
+
 To keep multiple intentional indexes, use named profiles or explicit paths:
 
 ```bash
@@ -210,8 +300,9 @@ GDRIVE_RAG_INDEX_PROFILE=local-multilingual gdrive-rag-mcp sync
 # Or set GDRIVE_RAG_DB_PATH explicitly for complete path control.
 ```
 
-The default profile keeps the backward-compatible `data/index.db` path; other profiles derive
-`data/index-<profile>.db`.
+The default index profile keeps the backward-compatible `data/index.db` path; other index profiles
+derive `data/index-<profile>.db`. An index profile selects an embedding/database combination; it is
+not a Hermes caller profile or an authorization boundary.
 
 ## MCP tools
 
@@ -219,13 +310,17 @@ All tool names and instructions are agent-neutral and marked read-only.
 
 | Tool | Purpose |
 |---|---|
-| `search_knowledge(query, limit)` | Hybrid search, citations, freshness, and evidence decision |
-| `get_document(document_id)` | Full indexed text assembled from ordered chunks |
-| `get_document_metadata(document_id)` | URL, MIME type, checksum, modified/indexed times |
-| `check_index_status()` | Counts, last sync, vector backend, and embedding fingerprint |
+| `search_knowledge(query, limit, owner_profile_id, business_function, para_category)` | Scope-locked hybrid search, citations, freshness, and evidence decision |
+| `get_document(document_id)` | Resolve an authorized Drive ID and instruct the profile to read the current source through Google Workspace |
+| `get_document_metadata(document_id)` | Authorized URL, scope, checksum, modified/indexed times |
+| `check_index_status()` | Caller-visible counts, last sync, vector backend, and embedding fingerprint |
 
 Weak hits are placed in `candidate_results` for diagnostics; normal `results` remain empty when the
 top score is below `GDRIVE_RAG_EVIDENCE_THRESHOLD`.
+
+Search returns indexed excerpts, not a second authoritative document. `get_document` deliberately
+does not return reconstructed full cached text. Use its authorized Drive ID with the profile's
+Google Workspace tool when the complete or current document is required.
 
 ## Local mode (stdio)
 
@@ -252,8 +347,14 @@ mcp_servers:
       GDRIVE_RAG_EMBED_PROVIDER: "${GDRIVE_RAG_EMBED_PROVIDER}"
       GDRIVE_RAG_EMBED_MODEL: "${GDRIVE_RAG_EMBED_MODEL}"
       GDRIVE_RAG_EMBED_DIMENSIONS: "${GDRIVE_RAG_EMBED_DIMENSIONS}"
+      GDRIVE_RAG_EMBED_BASE_URL: "${GDRIVE_RAG_EMBED_BASE_URL}"
       GDRIVE_RAG_EMBED_API_KEY_ENV: "${GDRIVE_RAG_EMBED_API_KEY_ENV}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      GDRIVE_RAG_PROFILE_ID: "finance"
+      GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS: "finance,shared"
+      GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS: "finance"
+      GDRIVE_RAG_ALLOWED_PARA_CATEGORIES: "projects,areas,resources,archives"
     timeout: 120
     connect_timeout: 30
     supports_parallel_tool_calls: true
@@ -278,8 +379,13 @@ env_vars = [
   "GDRIVE_RAG_EMBED_DIMENSIONS",
   "GDRIVE_RAG_EMBED_BASE_URL",
   "GDRIVE_RAG_EMBED_API_KEY_ENV",
+  "GDRIVE_RAG_PROFILE_ID",
+  "GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS",
+  "GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS",
+  "GDRIVE_RAG_ALLOWED_PARA_CATEGORIES",
   "GEMINI_API_KEY",
   "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
 ]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
@@ -292,12 +398,17 @@ Codex's current stdio forwarding and remote bearer-token keys are documented in 
 ## Server mode (Streamable HTTP)
 
 ```bash
-export GDRIVE_RAG_BEARER_TOKEN="$(openssl rand -hex 32)"
+export GDRIVE_RAG_ACCESS_POLICY_FILE=./secrets/access-policy.json
+export GDRIVE_RAG_TOKEN_ORCHESTRATOR="$(openssl rand -hex 32)"
+export GDRIVE_RAG_TOKEN_FINANCE="$(openssl rand -hex 32)"
 gdrive-rag-mcp serve --transport http
 ```
 
 The endpoint is `http://127.0.0.1:8000/mcp`; `GET /health` is an unauthenticated liveness check that
 returns no index details. Every `/mcp` request requires `Authorization: Bearer ...`.
+The matched token determines the immutable profile and allowed Drive scopes. A single
+`GDRIVE_RAG_BEARER_TOKEN` plus the stdio scope variables remains available for a one-profile
+deployment, but it is not the recommended multi-profile configuration.
 
 Terminate TLS at a trusted reverse proxy/load balancer, preserve the Authorization header, restrict
 inbound networks, and bind the application only to the proxy network. Never expose plain HTTP or put
@@ -316,8 +427,13 @@ export GDRIVE_RAG_EMBED_PROVIDER=gemini
 export GDRIVE_RAG_EMBED_API_KEY_ENV=GEMINI_API_KEY
 export GEMINI_API_KEY=your-runtime-secret
 docker compose run --rm app sync
-docker compose up -d app
+docker compose up -d app worker
 ```
+
+The `worker` consumes Drive changes every five minutes and performs a full reconciliation daily.
+For the multi-profile policy example, set
+`GDRIVE_RAG_ACCESS_POLICY_FILE=/run/secrets/access-policy.json` because Compose mounts the local
+`secrets/` directory at `/run/secrets`.
 
 For local Sentence Transformers, set `GDRIVE_RAG_EXTRAS=sentence-transformers` before building and
 choose a suitable image/runtime for the hardware. For separate container indexes, set distinct
@@ -363,7 +479,7 @@ with those transport values rather than copying an unverified client-specific sn
 ## Security and data handling
 
 - `.env`, databases, OAuth tokens, client secrets, service-account keys, downloaded files, model
-  caches, and generated indexes must remain outside source control.
+  caches, access-policy instances, and generated indexes must remain outside source control.
 - SQLite contains extracted source text. Encrypt disks/backups and restrict OS/volume access.
 - Hosted embedding providers receive extracted chunks during sync and queries during search. Review
   their data terms and residency. Use a suitable local model when data must not leave the host.
@@ -371,6 +487,8 @@ with those transport values rather than copying an unverified client-specific sn
 - The fingerprint stores a provider/model/dimension/endpoint identity, never an API key. MCP status
   omits the endpoint.
 - Rotate MCP, Google, and embedding-provider credentials and restart after rotation.
+- Give each profile a different bearer token. Grant `owner_profile_ids=["*"]` only to an explicitly
+  trusted orchestrator; members normally receive `self,shared` plus their business function.
 - Tools are retrieval-only; Drive writes and index mutation are not exposed through MCP.
 - See [SECURITY.md](SECURITY.md) for reporting and deployment hardening.
 
@@ -380,7 +498,11 @@ with those transport values rather than copying an unverified client-specific sn
 - Sheets index displayed cell values and sheet names, not charts, comments, or formula logic.
 - Docs comments, suggestions, revision history, linked files, and rich layout are not preserved.
 - Slides, images, audio, video, shortcuts, and arbitrary binary formats are skipped.
-- Sync is a folder-tree scan, not the Drive Changes API. Changes appear after the next successful sync.
+- The change feed is polling, not a push webhook. Freshness is bounded by the worker interval, and
+  folder changes intentionally trigger a full reconciliation.
+- Authorization metadata comes from the configured folder hierarchy, not native per-file Drive ACL
+  replication. Keep sensitive documents under correctly classified roots and retain Drive ACLs as
+  the primary storage boundary.
 - Search scores are heuristics, not probabilities. Tune the evidence threshold with domain-specific,
   multilingual evaluation before high-stakes use.
 - FTS tokenization is Unicode-aware but not a language-specific morphological analyzer. Languages

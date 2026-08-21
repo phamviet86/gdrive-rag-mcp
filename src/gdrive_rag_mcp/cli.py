@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from enum import StrEnum
 from typing import Annotated
 
@@ -30,10 +31,37 @@ def init_db() -> None:
 
 
 @app.command()
-def sync() -> None:
+def sync(
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Force a complete tree reconciliation."),
+    ] = False,
+) -> None:
     """Incrementally synchronize the configured Drive scope."""
     service = KnowledgeService(Settings.from_env())
-    typer.echo(json.dumps(service.sync(), indent=2))
+    result = service.full_sync() if full else service.sync()
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("sync-loop")
+def sync_loop(
+    interval_seconds: Annotated[int, typer.Option(min=30)] = 300,
+    full_interval_seconds: Annotated[int, typer.Option(min=300)] = 86400,
+) -> None:
+    """Poll Drive changes and periodically run a full reconciliation."""
+    if full_interval_seconds < interval_seconds:
+        raise typer.BadParameter("full interval must be greater than or equal to poll interval")
+    service = KnowledgeService(Settings.from_env())
+    last_full = 0.0
+    while True:
+        now = time.monotonic()
+        if now - last_full >= full_interval_seconds:
+            result = service.full_sync()
+            last_full = now
+        else:
+            result = service.sync()
+        typer.echo(json.dumps(result))
+        time.sleep(interval_seconds)
 
 
 @app.command()
@@ -82,9 +110,9 @@ def serve(
     settings = Settings.from_env()
     service = KnowledgeService(settings)
     if transport is Transport.stdio:
-        create_mcp_server(service).run(transport="stdio")
+        create_mcp_server(service, settings.default_access_scope()).run(transport="stdio")
         return
-    http_app = create_http_app(service, settings.bearer_token)
+    http_app = create_http_app(service, settings.access_policy())
     uvicorn.run(http_app, host=settings.host, port=settings.port)
 
 

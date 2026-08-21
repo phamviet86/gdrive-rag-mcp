@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .access import AccessScope
 from .embeddings import EmbeddingIdentity
 from .models import DocumentMetadata, SearchHit, SourceDocument
 
@@ -48,6 +49,7 @@ class SQLiteStore:
         self.vector_extension = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
+        self.path.chmod(0o600)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -84,7 +86,12 @@ class SQLiteStore:
                     modified_time TEXT NOT NULL,
                     checksum TEXT NOT NULL,
                     web_url TEXT NOT NULL,
-                    indexed_at TEXT NOT NULL
+                    indexed_at TEXT NOT NULL,
+                    owner_profile_id TEXT NOT NULL DEFAULT '',
+                    business_function TEXT NOT NULL DEFAULT '',
+                    para_category TEXT NOT NULL DEFAULT '',
+                    relative_path TEXT NOT NULL DEFAULT '',
+                    parent_folder_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,10 +117,28 @@ class SQLiteStore:
                 );
                 """
             )
+            self._migrate_document_scope(db)
             self._validate_embedding_identity(db)
             if self.vector_extension:
                 self._create_vector_table(db)
             db.commit()
+
+    @staticmethod
+    def _migrate_document_scope(db: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)")}
+        for name in (
+            "owner_profile_id",
+            "business_function",
+            "para_category",
+            "relative_path",
+            "parent_folder_id",
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_scope "
+            "ON documents(owner_profile_id,business_function,para_category)"
+        )
 
     def _create_vector_table(self, db: sqlite3.Connection) -> None:
         db.execute(
@@ -181,6 +206,25 @@ class SQLiteStore:
                 for row in db.execute("SELECT id, checksum FROM documents")
             }
 
+    def document_fingerprints(self) -> dict[str, str]:
+        with self.connection() as db:
+            return {
+                row["id"]: "\0".join(
+                    (
+                        row["checksum"],
+                        row["owner_profile_id"],
+                        row["business_function"],
+                        row["para_category"],
+                        row["relative_path"],
+                        row["parent_folder_id"],
+                    )
+                )
+                for row in db.execute(
+                    "SELECT id,checksum,owner_profile_id,business_function,para_category,"
+                    "relative_path,parent_folder_id FROM documents"
+                )
+            }
+
     def replace_document(
         self, document: SourceDocument, chunks: Sequence[str], embeddings: Sequence[Sequence[float]]
     ) -> None:
@@ -202,11 +246,18 @@ class SQLiteStore:
             indexed_at = _now()
             db.execute(
                 """INSERT INTO documents(
-                       id,name,mime_type,modified_time,checksum,web_url,indexed_at)
-                   VALUES(?,?,?,?,?,?,?)
+                       id,name,mime_type,modified_time,checksum,web_url,indexed_at,
+                       owner_profile_id,business_function,para_category,relative_path,
+                       parent_folder_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name, mime_type=excluded.mime_type,
                    modified_time=excluded.modified_time, checksum=excluded.checksum,
-                   web_url=excluded.web_url, indexed_at=excluded.indexed_at""",
+                   web_url=excluded.web_url, indexed_at=excluded.indexed_at,
+                   owner_profile_id=excluded.owner_profile_id,
+                   business_function=excluded.business_function,
+                   para_category=excluded.para_category,
+                   relative_path=excluded.relative_path,
+                   parent_folder_id=excluded.parent_folder_id""",
                 (
                     document.id,
                     document.name,
@@ -215,6 +266,11 @@ class SQLiteStore:
                     document.checksum,
                     document.web_url,
                     indexed_at,
+                    document.owner_profile_id,
+                    document.business_function,
+                    document.para_category,
+                    document.relative_path,
+                    document.parent_folder_id,
                 ),
             )
             for position, (text, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
@@ -279,32 +335,95 @@ class SQLiteStore:
         tokens = [token.replace('"', "") for token in query.split() if token.strip('"')]
         return " OR ".join(f'"{token}"' for token in tokens)
 
-    def keyword_scores(self, query: str, limit: int) -> dict[int, float]:
+    @staticmethod
+    def _scope_predicate(
+        scope: AccessScope | None,
+        owner_profile_id: str = "",
+        business_function: str = "",
+        para_category: str = "",
+        alias: str = "d",
+    ) -> tuple[str, list[str]]:
+        if scope is None:
+            return "1=1", []
+        owners, functions, para = scope.constraints(
+            owner_profile_id, business_function, para_category
+        )
+        clauses: list[str] = []
+        parameters: list[str] = []
+        for column, values in (
+            ("owner_profile_id", owners),
+            ("business_function", functions),
+            ("para_category", para),
+        ):
+            if "*" in values:
+                continue
+            placeholders = ",".join("?" for _ in values)
+            clauses.append(f"{alias}.{column} IN ({placeholders})")
+            parameters.extend(sorted(values))
+        return " AND ".join(clauses) if clauses else "1=1", parameters
+
+    def keyword_scores(
+        self,
+        query: str,
+        limit: int,
+        scope: AccessScope | None = None,
+        owner_profile_id: str = "",
+        business_function: str = "",
+        para_category: str = "",
+    ) -> dict[int, float]:
         expression = self._fts_query(query)
         if not expression:
             return {}
+        predicate, parameters = self._scope_predicate(
+            scope, owner_profile_id, business_function, para_category
+        )
         with self.connection() as db:
             rows = db.execute(
-                "SELECT CAST(chunk_id AS INTEGER) AS id, bm25(chunks_fts) AS rank "
-                "FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-                (expression, limit),
+                "SELECT CAST(f.chunk_id AS INTEGER) AS id, bm25(chunks_fts) AS rank "
+                "FROM chunks_fts f JOIN chunks c ON c.id=CAST(f.chunk_id AS INTEGER) "
+                "JOIN documents d ON d.id=c.document_id "
+                f"WHERE chunks_fts MATCH ? AND {predicate} ORDER BY rank LIMIT ?",
+                [expression, *parameters, limit],
             )
             return {row["id"]: 1.0 / (1.0 + abs(float(row["rank"]))) for row in rows}
 
-    def vector_scores(self, query_embedding: Sequence[float], limit: int) -> dict[int, float]:
+    def vector_scores(
+        self,
+        query_embedding: Sequence[float],
+        limit: int,
+        scope: AccessScope | None = None,
+        owner_profile_id: str = "",
+        business_function: str = "",
+        para_category: str = "",
+    ) -> dict[int, float]:
         if len(query_embedding) != self.dimensions:
             raise ValueError(f"Embedding dimension must be {self.dimensions}")
         with self.connection() as db:
-            if self.vector_extension:
+            if self.vector_extension and scope is None:
                 rows = db.execute(
                     "SELECT rowid AS id, distance FROM vec_chunks "
                     "WHERE embedding MATCH ? AND k = ?",
                     (_pack(query_embedding), limit),
                 )
                 return {row["id"]: max(0.0, 1.0 - float(row["distance"])) for row in rows}
+            predicate, parameters = self._scope_predicate(
+                scope, owner_profile_id, business_function, para_category
+            )
+            if self.vector_extension:
+                rows = db.execute(
+                    "SELECT c.id,vec_distance_cosine(c.embedding,?) AS distance "
+                    "FROM chunks c JOIN documents d ON d.id=c.document_id "
+                    f"WHERE {predicate} ORDER BY distance LIMIT ?",
+                    [_pack(query_embedding), *parameters, limit],
+                )
+                return {row["id"]: max(0.0, 1.0 - float(row["distance"])) for row in rows}
             query_norm = math.sqrt(sum(value * value for value in query_embedding)) or 1.0
             scored: list[tuple[int, float]] = []
-            for row in db.execute("SELECT id, embedding FROM chunks"):
+            for row in db.execute(
+                "SELECT c.id,c.embedding FROM chunks c JOIN documents d ON d.id=c.document_id "
+                f"WHERE {predicate}",
+                parameters,
+            ):
                 candidate = _unpack(row["embedding"])
                 norm = math.sqrt(sum(value * value for value in candidate)) or 1.0
                 cosine = sum(a * b for a, b in zip(query_embedding, candidate, strict=True)) / (
@@ -313,18 +432,30 @@ class SQLiteStore:
                 scored.append((row["id"], max(0.0, cosine)))
             return dict(sorted(scored, key=lambda item: item[1], reverse=True)[:limit])
 
-    def search_hits(self, scores: dict[int, float], limit: int) -> list[SearchHit]:
+    def search_hits(
+        self,
+        scores: dict[int, float],
+        limit: int,
+        scope: AccessScope | None = None,
+        owner_profile_id: str = "",
+        business_function: str = "",
+        para_category: str = "",
+    ) -> list[SearchHit]:
         if not scores:
             return []
         ids = list(scores)
         placeholders = ",".join("?" for _ in ids)
+        predicate, parameters = self._scope_predicate(
+            scope, owner_profile_id, business_function, para_category
+        )
         with self.connection() as db:
             rows = db.execute(
                 f"""SELECT c.id,c.document_id,c.position,c.text,d.name,d.modified_time,
-                           d.indexed_at,d.web_url
+                           d.indexed_at,d.web_url,d.owner_profile_id,d.business_function,
+                           d.para_category,d.relative_path
                     FROM chunks c JOIN documents d ON d.id=c.document_id
-                    WHERE c.id IN ({placeholders})""",
-                ids,
+                    WHERE c.id IN ({placeholders}) AND {predicate}""",
+                [*ids, *parameters],
             )
             hits = [
                 SearchHit(
@@ -337,14 +468,24 @@ class SQLiteStore:
                     indexed_at=row["indexed_at"],
                     web_url=row["web_url"],
                     position=row["position"],
+                    owner_profile_id=row["owner_profile_id"],
+                    business_function=row["business_function"],
+                    para_category=row["para_category"],
+                    relative_path=row["relative_path"],
                 )
                 for row in rows
             ]
         return sorted(hits, key=lambda hit: hit.score, reverse=True)[:limit]
 
-    def get_document(self, document_id: str) -> dict[str, Any] | None:
+    def get_document(
+        self, document_id: str, scope: AccessScope | None = None
+    ) -> dict[str, Any] | None:
+        predicate, parameters = self._scope_predicate(scope)
         with self.connection() as db:
-            document = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+            document = db.execute(
+                f"SELECT d.* FROM documents d WHERE d.id=? AND {predicate}",
+                [document_id, *parameters],
+            ).fetchone()
             if document is None:
                 return None
             chunks = [
@@ -355,9 +496,15 @@ class SQLiteStore:
             ]
             return {"metadata": dict(document), "text": "\n\n".join(chunks)}
 
-    def get_metadata(self, document_id: str) -> DocumentMetadata | None:
+    def get_metadata(
+        self, document_id: str, scope: AccessScope | None = None
+    ) -> DocumentMetadata | None:
+        predicate, parameters = self._scope_predicate(scope)
         with self.connection() as db:
-            row = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+            row = db.execute(
+                f"SELECT d.* FROM documents d WHERE d.id=? AND {predicate}",
+                [document_id, *parameters],
+            ).fetchone()
             return DocumentMetadata(**dict(row)) if row else None
 
     def set_state(self, key: str, value: Any) -> None:
@@ -370,10 +517,22 @@ class SQLiteStore:
             )
             db.commit()
 
-    def status(self) -> dict[str, Any]:
+    def get_state(self, key: str) -> Any | None:
         with self.connection() as db:
-            documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-            chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            row = db.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def status(self, scope: AccessScope | None = None) -> dict[str, Any]:
+        predicate, parameters = self._scope_predicate(scope)
+        with self.connection() as db:
+            documents = db.execute(
+                f"SELECT COUNT(*) FROM documents d WHERE {predicate}", parameters
+            ).fetchone()[0]
+            chunks = db.execute(
+                "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id=c.document_id "
+                f"WHERE {predicate}",
+                parameters,
+            ).fetchone()[0]
             state_rows = db.execute("SELECT key,value,updated_at FROM sync_state").fetchall()
             identity_row = db.execute(
                 "SELECT value FROM index_metadata WHERE key='embedding_identity'"

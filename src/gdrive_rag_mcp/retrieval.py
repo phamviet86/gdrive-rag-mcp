@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .access import AccessScope
 from .embeddings import Embedder
 from .storage import SQLiteStore
 
@@ -19,23 +20,58 @@ class HybridRetriever:
         self.evidence_threshold = evidence_threshold
         self.vector_weight = vector_weight
 
-    def search(self, query: str, limit: int = 5) -> dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        scope: AccessScope | None = None,
+        owner_profile_id: str = "",
+        business_function: str = "",
+        para_category: str = "",
+    ) -> dict[str, Any]:
         if not query.strip():
             raise ValueError("query must not be empty")
         candidate_limit = max(limit * 4, 20)
-        keyword = self.store.keyword_scores(query, candidate_limit)
-        vector = self.store.vector_scores(self.embedder.embed_query(query), candidate_limit)
+        keyword = self.store.keyword_scores(
+            query,
+            candidate_limit,
+            scope,
+            owner_profile_id,
+            business_function,
+            para_category,
+        )
+        vector = self.store.vector_scores(
+            self.embedder.embed_query(query),
+            candidate_limit,
+            scope,
+            owner_profile_id,
+            business_function,
+            para_category,
+        )
         candidate_ids = set(keyword) | set(vector)
         scores = {
             chunk_id: self.vector_weight * vector.get(chunk_id, 0.0)
             + (1.0 - self.vector_weight) * keyword.get(chunk_id, 0.0)
             for chunk_id in candidate_ids
         }
-        hits = self.store.search_hits(scores, limit)
+        hits = self.store.search_hits(
+            scores,
+            limit,
+            scope,
+            owner_profile_id,
+            business_function,
+            para_category,
+        )
         top_score = hits[0].score if hits else 0.0
         sufficient = bool(hits) and top_score >= self.evidence_threshold
         return {
             "query": query,
+            "applied_scope": {
+                "caller_profile_id": scope.profile_id if scope else "unrestricted-local",
+                "owner_profile_id": owner_profile_id or "allowed",
+                "business_function": business_function or "allowed",
+                "para_category": para_category or "allowed",
+            },
             "evidence": {
                 "sufficient": sufficient,
                 "top_score": round(top_score, 4),

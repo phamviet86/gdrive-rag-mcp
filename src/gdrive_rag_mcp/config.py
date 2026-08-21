@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .access import AccessPolicy, AccessScope
 from .embeddings import EmbeddingIdentity
 
 SUPPORTED_EMBED_PROVIDERS = {"gemini", "openai-compatible", "sentence-transformers"}
@@ -28,6 +29,13 @@ def _bool(name: str, default: bool) -> bool:
     if value.casefold() in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
+
+
+def _csv(name: str, default: str) -> tuple[str, ...]:
+    values = tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
+    if not values:
+        raise ValueError(f"{name} must contain at least one value")
+    return values
 
 
 def _provider(value: str) -> str:
@@ -58,6 +66,8 @@ class Settings:
     embed_batch_size: int = 32
     embed_timeout_seconds: float = 60.0
     embed_send_dimensions: bool = True
+    embed_query_input_type: str = ""
+    embed_document_input_type: str = ""
     embed_device: str = ""
     chunk_size: int = 700
     chunk_overlap: int = 100
@@ -66,6 +76,12 @@ class Settings:
     oauth_client_file: Path | None = None
     oauth_token_file: Path = Path("data/google-oauth-token.json")
     bearer_token: str = ""
+    access_policy_file: Path | None = None
+    profile_id: str = "default"
+    allowed_owner_profile_ids: tuple[str, ...] = ("self", "shared")
+    allowed_business_functions: tuple[str, ...] = ("*",)
+    allowed_para_categories: tuple[str, ...] = ("*",)
+    scope_layout: str = "profile-business-para"
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -98,6 +114,8 @@ class Settings:
             embed_batch_size=_int("GDRIVE_RAG_EMBED_BATCH_SIZE", 32),
             embed_timeout_seconds=_float("GDRIVE_RAG_EMBED_TIMEOUT_SECONDS", 60.0),
             embed_send_dimensions=_bool("GDRIVE_RAG_EMBED_SEND_DIMENSIONS", True),
+            embed_query_input_type=os.getenv("GDRIVE_RAG_EMBED_QUERY_INPUT_TYPE", ""),
+            embed_document_input_type=os.getenv("GDRIVE_RAG_EMBED_DOCUMENT_INPUT_TYPE", ""),
             embed_device=os.getenv("GDRIVE_RAG_EMBED_DEVICE", ""),
             chunk_size=_int("GDRIVE_RAG_CHUNK_SIZE", 700),
             chunk_overlap=_int("GDRIVE_RAG_CHUNK_OVERLAP", 100),
@@ -108,6 +126,12 @@ class Settings:
                 os.getenv("GOOGLE_OAUTH_TOKEN_FILE", "data/google-oauth-token.json")
             ),
             bearer_token=os.getenv("GDRIVE_RAG_BEARER_TOKEN", ""),
+            access_policy_file=path_or_none("GDRIVE_RAG_ACCESS_POLICY_FILE"),
+            profile_id=os.getenv("GDRIVE_RAG_PROFILE_ID", "default"),
+            allowed_owner_profile_ids=_csv("GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS", "self,shared"),
+            allowed_business_functions=_csv("GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS", "*"),
+            allowed_para_categories=_csv("GDRIVE_RAG_ALLOWED_PARA_CATEGORIES", "*"),
+            scope_layout=os.getenv("GDRIVE_RAG_SCOPE_LAYOUT", "profile-business-para").strip(),
             host=os.getenv("GDRIVE_RAG_HOST", "127.0.0.1"),
             port=_int("GDRIVE_RAG_PORT", 8000),
         )
@@ -140,6 +164,9 @@ class Settings:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.embed_api_key_env):
             raise ValueError("GDRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name")
         _profile_path(self.index_profile)
+        if self.scope_layout not in {"profile-business-para", "flat"}:
+            raise ValueError("GDRIVE_RAG_SCOPE_LAYOUT must be profile-business-para or flat")
+        self.default_access_scope()
 
     def embedding_api_key(self, required: bool) -> str:
         value = os.getenv(self.embed_api_key_env, "")
@@ -159,6 +186,19 @@ class Settings:
         return EmbeddingIdentity(
             self.embed_provider, self.embed_model, self.embed_dimensions, endpoint
         )
+
+    def default_access_scope(self) -> AccessScope:
+        return AccessScope.create(
+            self.profile_id,
+            self.allowed_owner_profile_ids,
+            self.allowed_business_functions,
+            self.allowed_para_categories,
+        )
+
+    def access_policy(self) -> AccessPolicy:
+        if self.access_policy_file:
+            return AccessPolicy.from_file(self.access_policy_file)
+        return AccessPolicy.from_single_token(self.bearer_token, self.default_access_scope())
 
     def require_sync(self) -> None:
         missing = []

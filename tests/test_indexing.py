@@ -4,7 +4,7 @@ from pathlib import Path
 
 from gdrive_rag_mcp.embeddings import HashingEmbedder
 from gdrive_rag_mcp.indexer import Indexer
-from gdrive_rag_mcp.models import SourceDocument
+from gdrive_rag_mcp.models import DriveChangeBatch, SourceDocument
 from gdrive_rag_mcp.storage import SQLiteStore
 
 
@@ -45,6 +45,7 @@ def test_incremental_add_update_and_delete(tmp_path: Path) -> None:
         "unchanged": 0,
         "deleted": 0,
         "skipped": 0,
+        "scope_skipped": 0,
         "completed_at": "ignored",
     }
 
@@ -73,3 +74,26 @@ def test_status_records_sync_freshness(tmp_path: Path) -> None:
     status = store.status()
     assert status["last_sync"] is not None
     assert status["documents"] == 0
+
+
+def test_change_batch_updates_and_deletes_without_full_scan(tmp_path: Path) -> None:
+    embedder = HashingEmbedder(32)
+    store = SQLiteStore(tmp_path / "index.db", embedder.dimensions)
+    indexer = Indexer(FakeSource([]), store, embedder, OneChunk())  # type: ignore[arg-type]
+    store.replace_document(
+        document("delete-me", "v1", "old"), ["old"], embedder.embed_documents(["old"])
+    )
+
+    result = indexer.sync_changes(
+        DriveChangeBatch(
+            changed_documents=(document("new", "v1", "new policy"),),
+            delete_document_ids=frozenset({"delete-me"}),
+            new_start_page_token="next-token",
+        )
+    )
+
+    assert result["mode"] == "changes"
+    assert result["added"] == 1
+    assert result["deleted"] == 1
+    assert store.get_document("delete-me") is None
+    assert store.get_document("new") is not None

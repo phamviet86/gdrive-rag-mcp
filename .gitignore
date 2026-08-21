@@ -13,6 +13,7 @@ dist/
 build/
 data/
 secrets/
+access-policy.json
 work/
 outputs/
 *.db

@@ -120,12 +120,16 @@ class OpenAICompatibleEmbedder:
         batch_size: int = 64,
         timeout_seconds: float = 60.0,
         send_dimensions: bool = True,
+        query_input_type: str = "",
+        document_input_type: str = "",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
         self.batch_size = batch_size
         self.send_dimensions = send_dimensions
+        self.query_input_type = query_input_type
+        self.document_input_type = document_input_type
         normalized_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.client = httpx.Client(
@@ -136,7 +140,7 @@ class OpenAICompatibleEmbedder:
         )
         self.identity = EmbeddingIdentity("openai-compatible", model, dimensions, normalized_url)
 
-    def _embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def _embed(self, texts: Sequence[str], input_type: str = "") -> list[list[float]]:
         vectors: list[list[float]] = []
         for batch in _batches(texts, self.batch_size):
             body: dict[str, Any] = {
@@ -146,6 +150,8 @@ class OpenAICompatibleEmbedder:
             }
             if self.send_dimensions:
                 body["dimensions"] = self.dimensions
+            if input_type:
+                body["input_type"] = input_type
             response = self.client.post("/embeddings", json=body)
             if response.is_error:
                 raise RuntimeError(
@@ -161,10 +167,10 @@ class OpenAICompatibleEmbedder:
         return _validate_vectors(vectors, len(texts), self.dimensions)
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        return self._embed(texts)
+        return self._embed(texts, self.document_input_type)
 
     def embed_query(self, text: str) -> list[float]:
-        return self._embed([text])[0]
+        return self._embed([text], self.query_input_type)[0]
 
 
 class SentenceTransformersEmbedder:
@@ -250,6 +256,8 @@ def create_embedder(settings: Settings) -> Embedder:
             batch_size=settings.embed_batch_size,
             timeout_seconds=settings.embed_timeout_seconds,
             send_dimensions=settings.embed_send_dimensions,
+            query_input_type=settings.embed_query_input_type,
+            document_input_type=settings.embed_document_input_type,
         )
     if provider == "sentence-transformers":
         return SentenceTransformersEmbedder(

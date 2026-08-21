@@ -28,7 +28,11 @@ for rotation.
   can silently corrupt retrieval; rebuild the generated index or select another database/profile.
 - Use TLS and a trusted reverse proxy for remote access. Add network allowlists, rate limiting,
   identity-aware access or mTLS when appropriate.
-- Generate at least 32 random bytes for the bearer token and rotate it periodically.
+- Generate at least 32 random bytes for every profile bearer token and rotate it periodically.
+- Keep token values in environment variables; access-policy JSON contains only token variable names.
+- Derive authorization from the authenticated token. Never trust a caller-supplied profile ID.
+- Grant wildcard owner/function/PARA access only to an explicitly trusted orchestrator. Test that
+  member profiles cannot retrieve another owner's private chunks before production use.
 - Treat the database as confidential because it contains extracted text.
 - Run the container as the included non-root user and scan pinned dependencies/images regularly.
 - Review source citations and freshness; the evidence gate does not make retrieved content correct.
