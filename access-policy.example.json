@@ -3,16 +3,12 @@
     {
       "profile_id": "orchestrator",
       "token_env": "GDRIVE_RAG_TOKEN_ORCHESTRATOR",
-      "owner_profile_ids": ["*"],
-      "business_functions": ["*"],
-      "para_categories": ["*"]
+      "allowed_folder_ids": ["YOUR_CONFIGURED_ROOT_FOLDER_ID"]
     },
     {
       "profile_id": "finance",
       "token_env": "GDRIVE_RAG_TOKEN_FINANCE",
-      "owner_profile_ids": ["self", "shared"],
-      "business_functions": ["finance"],
-      "para_categories": ["projects", "areas", "resources", "archives"]
+      "allowed_folder_ids": ["FINANCE_PROFILE_OR_BUSINESS_FOLDER_ID"]
     }
   ]
 }

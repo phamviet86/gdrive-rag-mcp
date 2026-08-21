@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -42,19 +43,15 @@ def create_mcp_server(
     @server.tool(annotations=READ_ONLY)
     def search_knowledge(
         query: str,
+        scope_folder_id: str,
         limit: int = 5,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
     ) -> dict[str, Any]:
-        """Hybrid semantic/keyword search with citations and a conservative evidence gate."""
+        """Search a Drive folder ID and all descendants with citations and an evidence gate."""
         return service.retriever.search(
             query,
+            scope_folder_id,
             max(1, min(limit, 20)),
             current_scope(default_scope),
-            owner_profile_id,
-            business_function,
-            para_category,
         )
 
     @server.tool(annotations=READ_ONLY)
@@ -70,7 +67,7 @@ def create_mcp_server(
             "modified_time": metadata.modified_time,
             "indexed_at": metadata.indexed_at,
             "relative_path": metadata.relative_path,
-            "scope": {
+            "path_metadata": {
                 "owner_profile_id": metadata.owner_profile_id,
                 "business_function": metadata.business_function,
                 "para_category": metadata.para_category,
@@ -101,6 +98,7 @@ def create_mcp_server(
             "business_function": metadata.business_function,
             "para_category": metadata.para_category,
             "relative_path": metadata.relative_path,
+            "ancestor_folder_ids": json.loads(metadata.folder_ancestry),
         }
 
     @server.tool(annotations=READ_ONLY)

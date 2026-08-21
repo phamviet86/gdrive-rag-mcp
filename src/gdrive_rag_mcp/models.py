@@ -18,6 +18,7 @@ class SourceDocument:
     para_category: str = ""
     relative_path: str = ""
     parent_folder_id: str = ""
+    ancestor_folder_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class DocumentMetadata:
     para_category: str
     relative_path: str
     parent_folder_id: str
+    folder_ancestry: str
 
 
 @dataclass(frozen=True, slots=True)

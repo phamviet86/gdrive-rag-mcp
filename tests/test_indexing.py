@@ -30,6 +30,8 @@ def document(doc_id: str, checksum: str, text: str) -> SourceDocument:
         checksum=checksum,
         web_url=f"https://drive.google.com/open?id={doc_id}",
         text=text,
+        parent_folder_id="test-root",
+        ancestor_folder_ids=("test-root",),
     )
 
 

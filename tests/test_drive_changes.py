@@ -45,6 +45,7 @@ def document(document_id: str) -> SourceDocument:
         para_category="areas",
         relative_path="shared/operations/areas/policy.md",
         parent_folder_id="areas-folder",
+        ancestor_folder_ids=("root", "shared", "operations", "areas-folder"),
     )
 
 

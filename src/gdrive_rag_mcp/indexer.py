@@ -37,6 +37,7 @@ class Indexer:
                 document.para_category,
                 document.relative_path,
                 document.parent_folder_id,
+                *document.ancestor_folder_ids,
             )
         )
 

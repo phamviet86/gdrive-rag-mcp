@@ -38,6 +38,14 @@ def _csv(name: str, default: str) -> tuple[str, ...]:
     return values
 
 
+def _csv_or(name: str, fallback: str) -> tuple[str, ...]:
+    return (
+        _csv(name, fallback)
+        if os.getenv(name, "").strip()
+        else tuple(item.strip() for item in fallback.split(",") if item.strip())
+    )
+
+
 def _provider(value: str) -> str:
     normalized = value.strip().casefold().replace("_", "-")
     if normalized not in SUPPORTED_EMBED_PROVIDERS:
@@ -78,10 +86,7 @@ class Settings:
     bearer_token: str = ""
     access_policy_file: Path | None = None
     profile_id: str = "default"
-    allowed_owner_profile_ids: tuple[str, ...] = ("self", "shared")
-    allowed_business_functions: tuple[str, ...] = ("*",)
-    allowed_para_categories: tuple[str, ...] = ("*",)
-    scope_layout: str = "profile-business-para"
+    allowed_folder_ids: tuple[str, ...] = ("*",)
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -128,10 +133,9 @@ class Settings:
             bearer_token=os.getenv("GDRIVE_RAG_BEARER_TOKEN", ""),
             access_policy_file=path_or_none("GDRIVE_RAG_ACCESS_POLICY_FILE"),
             profile_id=os.getenv("GDRIVE_RAG_PROFILE_ID", "default"),
-            allowed_owner_profile_ids=_csv("GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS", "self,shared"),
-            allowed_business_functions=_csv("GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS", "*"),
-            allowed_para_categories=_csv("GDRIVE_RAG_ALLOWED_PARA_CATEGORIES", "*"),
-            scope_layout=os.getenv("GDRIVE_RAG_SCOPE_LAYOUT", "profile-business-para").strip(),
+            allowed_folder_ids=_csv_or(
+                "GDRIVE_RAG_ALLOWED_FOLDER_IDS", os.getenv("GDRIVE_FOLDER_ID", "") or "*"
+            ),
             host=os.getenv("GDRIVE_RAG_HOST", "127.0.0.1"),
             port=_int("GDRIVE_RAG_PORT", 8000),
         )
@@ -164,8 +168,6 @@ class Settings:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.embed_api_key_env):
             raise ValueError("GDRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name")
         _profile_path(self.index_profile)
-        if self.scope_layout not in {"profile-business-para", "flat"}:
-            raise ValueError("GDRIVE_RAG_SCOPE_LAYOUT must be profile-business-para or flat")
         self.default_access_scope()
 
     def embedding_api_key(self, required: bool) -> str:
@@ -190,9 +192,7 @@ class Settings:
     def default_access_scope(self) -> AccessScope:
         return AccessScope.create(
             self.profile_id,
-            self.allowed_owner_profile_ids,
-            self.allowed_business_functions,
-            self.allowed_para_categories,
+            self.allowed_folder_ids,
         )
 
     def access_policy(self) -> AccessPolicy:

@@ -99,3 +99,5 @@ async def test_mcp_tools_have_stable_names_and_read_only_annotations() -> None:
         "check_index_status",
     }
     assert all(tool.annotations and tool.annotations.read_only_hint for tool in tools)
+    search_tool = next(tool for tool in tools if tool.name == "search_knowledge")
+    assert {"query", "scope_folder_id"} <= set(search_tool.input_schema["required"])

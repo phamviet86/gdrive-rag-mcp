@@ -91,8 +91,17 @@ class SQLiteStore:
                     business_function TEXT NOT NULL DEFAULT '',
                     para_category TEXT NOT NULL DEFAULT '',
                     relative_path TEXT NOT NULL DEFAULT '',
-                    parent_folder_id TEXT NOT NULL DEFAULT ''
+                    parent_folder_id TEXT NOT NULL DEFAULT '',
+                    folder_ancestry TEXT NOT NULL DEFAULT '[]'
                 );
+                CREATE TABLE IF NOT EXISTS document_folder_ancestors (
+                    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    folder_id TEXT NOT NULL,
+                    depth INTEGER NOT NULL,
+                    PRIMARY KEY(document_id, folder_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_document_folder_ancestors_folder
+                    ON document_folder_ancestors(folder_id, document_id);
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -132,9 +141,13 @@ class SQLiteStore:
             "para_category",
             "relative_path",
             "parent_folder_id",
+            "folder_ancestry",
         ):
             if name not in columns:
-                db.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+                default = "'[]'" if name == "folder_ancestry" else "''"
+                db.execute(
+                    f"ALTER TABLE documents ADD COLUMN {name} TEXT NOT NULL DEFAULT {default}"
+                )
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_scope "
             "ON documents(owner_profile_id,business_function,para_category)"
@@ -217,11 +230,12 @@ class SQLiteStore:
                         row["para_category"],
                         row["relative_path"],
                         row["parent_folder_id"],
+                        *json.loads(row["folder_ancestry"]),
                     )
                 )
                 for row in db.execute(
                     "SELECT id,checksum,owner_profile_id,business_function,para_category,"
-                    "relative_path,parent_folder_id FROM documents"
+                    "relative_path,parent_folder_id,folder_ancestry FROM documents"
                 )
             }
 
@@ -248,8 +262,8 @@ class SQLiteStore:
                 """INSERT INTO documents(
                        id,name,mime_type,modified_time,checksum,web_url,indexed_at,
                        owner_profile_id,business_function,para_category,relative_path,
-                       parent_folder_id)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                       parent_folder_id,folder_ancestry)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name, mime_type=excluded.mime_type,
                    modified_time=excluded.modified_time, checksum=excluded.checksum,
                    web_url=excluded.web_url, indexed_at=excluded.indexed_at,
@@ -257,7 +271,8 @@ class SQLiteStore:
                    business_function=excluded.business_function,
                    para_category=excluded.para_category,
                    relative_path=excluded.relative_path,
-                   parent_folder_id=excluded.parent_folder_id""",
+                   parent_folder_id=excluded.parent_folder_id,
+                   folder_ancestry=excluded.folder_ancestry""",
                 (
                     document.id,
                     document.name,
@@ -271,6 +286,15 @@ class SQLiteStore:
                     document.para_category,
                     document.relative_path,
                     document.parent_folder_id,
+                    json.dumps(document.ancestor_folder_ids),
+                ),
+            )
+            db.execute("DELETE FROM document_folder_ancestors WHERE document_id=?", (document.id,))
+            db.executemany(
+                "INSERT INTO document_folder_ancestors(document_id,folder_id,depth) VALUES(?,?,?)",
+                (
+                    (document.id, folder_id, depth)
+                    for depth, folder_id in enumerate(document.ancestor_folder_ids)
                 ),
             )
             for position, (text, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
@@ -338,28 +362,27 @@ class SQLiteStore:
     @staticmethod
     def _scope_predicate(
         scope: AccessScope | None,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
+        scope_folder_id: str = "",
         alias: str = "d",
     ) -> tuple[str, list[str]]:
-        if scope is None:
-            return "1=1", []
-        owners, functions, para = scope.constraints(
-            owner_profile_id, business_function, para_category
-        )
         clauses: list[str] = []
         parameters: list[str] = []
-        for column, values in (
-            ("owner_profile_id", owners),
-            ("business_function", functions),
-            ("para_category", para),
-        ):
-            if "*" in values:
-                continue
-            placeholders = ",".join("?" for _ in values)
-            clauses.append(f"{alias}.{column} IN ({placeholders})")
-            parameters.extend(sorted(values))
+        if scope is not None and "*" not in scope.allowed_folder_ids:
+            allowed = sorted(scope.allowed_folder_ids)
+            placeholders = ",".join("?" for _ in allowed)
+            clauses.append(
+                "EXISTS (SELECT 1 FROM document_folder_ancestors auth_scope "
+                f"WHERE auth_scope.document_id={alias}.id "
+                f"AND auth_scope.folder_id IN ({placeholders}))"
+            )
+            parameters.extend(allowed)
+        if scope_folder_id:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM document_folder_ancestors requested_scope "
+                f"WHERE requested_scope.document_id={alias}.id "
+                "AND requested_scope.folder_id=?)"
+            )
+            parameters.append(scope_folder_id.strip())
         return " AND ".join(clauses) if clauses else "1=1", parameters
 
     def keyword_scores(
@@ -367,16 +390,12 @@ class SQLiteStore:
         query: str,
         limit: int,
         scope: AccessScope | None = None,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
+        scope_folder_id: str = "",
     ) -> dict[int, float]:
         expression = self._fts_query(query)
         if not expression:
             return {}
-        predicate, parameters = self._scope_predicate(
-            scope, owner_profile_id, business_function, para_category
-        )
+        predicate, parameters = self._scope_predicate(scope, scope_folder_id)
         with self.connection() as db:
             rows = db.execute(
                 "SELECT CAST(f.chunk_id AS INTEGER) AS id, bm25(chunks_fts) AS rank "
@@ -392,9 +411,7 @@ class SQLiteStore:
         query_embedding: Sequence[float],
         limit: int,
         scope: AccessScope | None = None,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
+        scope_folder_id: str = "",
     ) -> dict[int, float]:
         if len(query_embedding) != self.dimensions:
             raise ValueError(f"Embedding dimension must be {self.dimensions}")
@@ -406,9 +423,7 @@ class SQLiteStore:
                     (_pack(query_embedding), limit),
                 )
                 return {row["id"]: max(0.0, 1.0 - float(row["distance"])) for row in rows}
-            predicate, parameters = self._scope_predicate(
-                scope, owner_profile_id, business_function, para_category
-            )
+            predicate, parameters = self._scope_predicate(scope, scope_folder_id)
             if self.vector_extension:
                 rows = db.execute(
                     "SELECT c.id,vec_distance_cosine(c.embedding,?) AS distance "
@@ -437,17 +452,13 @@ class SQLiteStore:
         scores: dict[int, float],
         limit: int,
         scope: AccessScope | None = None,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
+        scope_folder_id: str = "",
     ) -> list[SearchHit]:
         if not scores:
             return []
         ids = list(scores)
         placeholders = ",".join("?" for _ in ids)
-        predicate, parameters = self._scope_predicate(
-            scope, owner_profile_id, business_function, para_category
-        )
+        predicate, parameters = self._scope_predicate(scope, scope_folder_id)
         with self.connection() as db:
             rows = db.execute(
                 f"""SELECT c.id,c.document_id,c.position,c.text,d.name,d.modified_time,

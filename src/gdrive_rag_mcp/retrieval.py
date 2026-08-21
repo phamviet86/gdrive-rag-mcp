@@ -23,30 +23,26 @@ class HybridRetriever:
     def search(
         self,
         query: str,
+        scope_folder_id: str,
         limit: int = 5,
         scope: AccessScope | None = None,
-        owner_profile_id: str = "",
-        business_function: str = "",
-        para_category: str = "",
     ) -> dict[str, Any]:
         if not query.strip():
             raise ValueError("query must not be empty")
+        if not scope_folder_id.strip():
+            raise ValueError("scope_folder_id must not be empty")
         candidate_limit = max(limit * 4, 20)
         keyword = self.store.keyword_scores(
             query,
             candidate_limit,
             scope,
-            owner_profile_id,
-            business_function,
-            para_category,
+            scope_folder_id,
         )
         vector = self.store.vector_scores(
             self.embedder.embed_query(query),
             candidate_limit,
             scope,
-            owner_profile_id,
-            business_function,
-            para_category,
+            scope_folder_id,
         )
         candidate_ids = set(keyword) | set(vector)
         scores = {
@@ -58,9 +54,7 @@ class HybridRetriever:
             scores,
             limit,
             scope,
-            owner_profile_id,
-            business_function,
-            para_category,
+            scope_folder_id,
         )
         top_score = hits[0].score if hits else 0.0
         sufficient = bool(hits) and top_score >= self.evidence_threshold
@@ -68,9 +62,8 @@ class HybridRetriever:
             "query": query,
             "applied_scope": {
                 "caller_profile_id": scope.profile_id if scope else "unrestricted-local",
-                "owner_profile_id": owner_profile_id or "allowed",
-                "business_function": business_function or "allowed",
-                "para_category": para_category or "allowed",
+                "scope_folder_id": scope_folder_id,
+                "includes_descendants": True,
             },
             "evidence": {
                 "sufficient": sufficient,

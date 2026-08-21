@@ -94,50 +94,38 @@ class GoogleDriveSource:
                 return result
 
     def _metadata(self) -> Iterator[dict[str, Any]]:
-        pending: list[tuple[str, tuple[str, ...]]] = [(self.settings.folder_id, ())]
+        pending: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
+            (self.settings.folder_id, (), (self.settings.folder_id,))
+        ]
         seen: set[str] = set()
         while pending:
-            folder_id, folder_path = pending.pop()
+            folder_id, folder_path, ancestor_folder_ids = pending.pop()
             if folder_id in seen:
                 continue
             seen.add(folder_id)
             for item in self._list_children(folder_id):
                 if item["mimeType"] == FOLDER_MIME:
-                    pending.append((item["id"], (*folder_path, item["name"])))
+                    pending.append(
+                        (
+                            item["id"],
+                            (*folder_path, item["name"]),
+                            (*ancestor_folder_ids, item["id"]),
+                        )
+                    )
                 elif item["mimeType"] in SUPPORTED_MIMES:
-                    classification = self._classify(folder_path)
-                    if classification is None:
-                        self.scope_skipped += 1
-                        continue
-                    item.update(classification)
+                    item.update(self._classify(folder_path))
                     item["relativePath"] = "/".join((*folder_path, item["name"]))
                     item["parentFolderId"] = folder_id
+                    item["ancestorFolderIds"] = ancestor_folder_ids
                     yield item
 
-    def _classify(self, folder_path: tuple[str, ...]) -> dict[str, str] | None:
-        if self.settings.scope_layout == "flat":
-            return {
-                "ownerProfileId": "shared",
-                "businessFunction": "general",
-                "paraCategory": "resources",
-            }
-        if len(folder_path) < 3:
-            return None
-        owner = normalize_scope_value(folder_path[0])
-        business_function = normalize_scope_value(folder_path[1])
-        para_category = normalize_para(folder_path[2])
-        if (
-            not owner
-            or not business_function
-            or para_category
-            not in {
-                "projects",
-                "areas",
-                "resources",
-                "archives",
-            }
-        ):
-            return None
+    @staticmethod
+    def _classify(folder_path: tuple[str, ...]) -> dict[str, str]:
+        owner = normalize_scope_value(folder_path[0]) if folder_path else ""
+        business_function = normalize_scope_value(folder_path[1]) if len(folder_path) > 1 else ""
+        para_category = normalize_para(folder_path[2]) if len(folder_path) > 2 else ""
+        if para_category not in {"projects", "areas", "resources", "archives"}:
+            para_category = ""
         return {
             "ownerProfileId": owner,
             "businessFunction": business_function,
@@ -180,6 +168,7 @@ class GoogleDriveSource:
             para_category=item["paraCategory"],
             relative_path=item["relativePath"],
             parent_folder_id=item["parentFolderId"],
+            ancestor_folder_ids=tuple(item["ancestorFolderIds"]),
         )
 
     @staticmethod
@@ -240,12 +229,15 @@ class GoogleDriveSource:
             raise
         return item if not item.get("trashed") else None
 
-    def _relative_folder_path(self, item: dict[str, Any]) -> tuple[str, ...] | None:
+    def _relative_folder_path(
+        self, item: dict[str, Any]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
         parents = list(item.get("parents", []))
         if not parents:
             return None
         current_id = str(parents[0])
         names: list[str] = []
+        folder_ids: list[str] = []
         seen: set[str] = set()
         while current_id != self.settings.folder_id:
             if current_id in seen:
@@ -255,27 +247,27 @@ class GoogleDriveSource:
             if parent is None or parent.get("mimeType") != FOLDER_MIME:
                 return None
             names.append(str(parent["name"]))
+            folder_ids.append(current_id)
             parent_ids = list(parent.get("parents", []))
             if not parent_ids:
                 return None
             current_id = str(parent_ids[0])
         names.reverse()
-        return tuple(names)
+        folder_ids.reverse()
+        return tuple(names), (self.settings.folder_id, *folder_ids)
 
     def document_by_id(self, file_id: str) -> SourceDocument | None:
         item = self._get_item(file_id)
         if item is None or item.get("mimeType") not in SUPPORTED_MIMES:
             return None
-        folder_path = self._relative_folder_path(item)
-        if folder_path is None:
+        resolved_path = self._relative_folder_path(item)
+        if resolved_path is None:
             return None
-        classification = self._classify(folder_path)
-        if classification is None:
-            self.scope_skipped += 1
-            return None
-        item.update(classification)
+        folder_path, ancestor_folder_ids = resolved_path
+        item.update(self._classify(folder_path))
         item["relativePath"] = "/".join((*folder_path, item["name"]))
         item["parentFolderId"] = str(item["parents"][0])
+        item["ancestorFolderIds"] = ancestor_folder_ids
         return self._source_document(item)
 
     def changes(self, page_token: str) -> DriveChangeBatch:

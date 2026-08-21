@@ -19,7 +19,8 @@ It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking b
 ## What the MVP does
 
 - Recursively reads one configured Drive folder or Shared Drive scope with the read-only API.
-- Derives `owner_profile_id`, `business_function`, and PARA category from the Drive folder path.
+- Stores every ancestor folder ID so any folder can be used as a recursive search boundary.
+- Derives optional `owner_profile_id`, `business_function`, and PARA labels for display only.
 - Authenticates the caller before tool execution and filters both FTS5 and vector candidates before
   ranking. A profile cannot widen its scope with tool arguments.
 - Extracts Google Docs, Google Sheets, text/Markdown, text-based PDFs, and DOCX.
@@ -38,8 +39,8 @@ It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking b
 
 ```mermaid
 flowchart LR
-    D[Selected Google Drive scope] -->|read-only Drive API + change feed| X[Path classifier]
-    X -->|owner / function / PARA| Y[Format extractors]
+    D[Selected Google Drive root] -->|read-only Drive API + change feed| X[Folder ancestry]
+    X -->|folder IDs + optional path labels| Y[Format extractors]
     Y --> L[LlamaIndex chunking boundary]
     L --> E{Embedding provider}
     E -->|Gemini| V[Normalized vectors]
@@ -200,10 +201,10 @@ The Drive API has no OAuth scope meaning “read only this existing folder.” T
 files the user can read; the indexer enforces the configured folder during traversal. See Google's
 [Drive authorization guide](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
 
-## Drive layout and document scopes
+## Drive folder scopes
 
-The default `profile-business-para` layout treats the first three folders below
-`GDRIVE_FOLDER_ID` as authorization metadata:
+`GDRIVE_FOLDER_ID` is the root indexed by the worker. The folder layout is an organizational
+choice, not an authorization schema. A profile/business/PARA structure remains useful, for example:
 
 ```text
 <configured-root>/
@@ -215,27 +216,27 @@ The default `profile-business-para` layout treats the first three folders below
         └── archives/
 ```
 
-Two-digit ordering prefixes are accepted, so `01-orchestrator/02-finance/03-resources/file.md`
-becomes owner `orchestrator`, function `finance`, and PARA category `resources`. Files above the
-third level or under an invalid PARA folder are not indexed and increment `scope_skipped` in the
-sync report. This fail-closed rule prevents accidentally unclassified documents from becoming
-globally searchable.
+Every supported file below the configured root is indexed regardless of depth. The index records
+the configured root ID and every descendant folder ID in that file's ancestry. Therefore one
+`scope_folder_id` always means “this folder and all descendants”:
 
-Use `GDRIVE_RAG_SCOPE_LAYOUT=flat` only for a deliberately shared, unpartitioned corpus. Flat mode
-classifies every file as `shared/general/resources`.
+- a profile-owner folder ID searches the entire profile tree;
+- a business-function folder ID searches that function and every nested PARA folder;
+- any deeper folder ID narrows the same operation to that subtree.
+
+Two-digit prefixes and the first three path levels may still produce owner/function/PARA labels in
+results, but those names never grant access and are not required.
 
 Each stdio process has one immutable caller identity:
 
 ```bash
 export GDRIVE_RAG_PROFILE_ID=finance
-export GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS=self,shared
-export GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS=finance
-export GDRIVE_RAG_ALLOWED_PARA_CATEGORIES=projects,areas,resources,archives
+export GDRIVE_RAG_ALLOWED_FOLDER_IDS=finance_profile_folder_id,shared_finance_folder_id
 ```
 
-`self` resolves to `GDRIVE_RAG_PROFILE_ID`. Leave a search filter empty to search all values that
-the caller is allowed to use. A requested owner, function, or PARA value outside that scope is
-rejected rather than silently widened.
+Each allowed ID grants only that folder and its descendants. The caller must also pass a
+`scope_folder_id` on every search. SQL applies both boundaries before FTS5 or vector ranking, so a
+folder outside the token's granted roots returns no documents.
 
 For HTTP with multiple profiles, copy `access-policy.example.json` to an operator-only location.
 The policy contains token environment-variable names, never token values:
@@ -260,8 +261,8 @@ gdrive-rag-mcp status
 
 The first `sync` performs a full tree reconciliation and records a Drive start-page token. Later
 runs consume the Drive Changes API, avoid re-embedding unchanged files, and remove deleted,
-inaccessible, moved-out, or newly unclassified files. A folder change triggers a full
-reconciliation because it can change the scope of every descendant.
+inaccessible, or moved-out files. A folder change triggers a full reconciliation because it can
+change the ancestry of every descendant.
 
 Run a durable polling worker on the VPS:
 
@@ -292,6 +293,10 @@ Version 0.3 adds scope columns to existing databases automatically. Existing row
 empty scope values and are invisible to scoped callers. Run `gdrive-rag-mcp sync --full` after an
 upgrade so every current Drive path is classified before serving profiles.
 
+Version 0.4 replaces label-based authorization with recursive folder-ID ancestry. The schema
+migrates automatically, but old rows have no ancestry entries. Run `gdrive-rag-mcp sync --full`
+before serving so each document records the configured root and all parent folder IDs.
+
 To keep multiple intentional indexes, use named profiles or explicit paths:
 
 ```bash
@@ -310,7 +315,7 @@ All tool names and instructions are agent-neutral and marked read-only.
 
 | Tool | Purpose |
 |---|---|
-| `search_knowledge(query, limit, owner_profile_id, business_function, para_category)` | Scope-locked hybrid search, citations, freshness, and evidence decision |
+| `search_knowledge(query, scope_folder_id, limit)` | Search one Drive folder ID and all descendants with citations, freshness, and an evidence decision |
 | `get_document(document_id)` | Resolve an authorized Drive ID and instruct the profile to read the current source through Google Workspace |
 | `get_document_metadata(document_id)` | Authorized URL, scope, checksum, modified/indexed times |
 | `check_index_status()` | Caller-visible counts, last sync, vector backend, and embedding fingerprint |
@@ -352,9 +357,7 @@ mcp_servers:
       GEMINI_API_KEY: "${GEMINI_API_KEY}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
       GDRIVE_RAG_PROFILE_ID: "finance"
-      GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS: "finance,shared"
-      GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS: "finance"
-      GDRIVE_RAG_ALLOWED_PARA_CATEGORIES: "projects,areas,resources,archives"
+      GDRIVE_RAG_ALLOWED_FOLDER_IDS: "${FINANCE_PROFILE_FOLDER_ID},${SHARED_FINANCE_FOLDER_ID}"
     timeout: 120
     connect_timeout: 30
     supports_parallel_tool_calls: true
@@ -380,9 +383,7 @@ env_vars = [
   "GDRIVE_RAG_EMBED_BASE_URL",
   "GDRIVE_RAG_EMBED_API_KEY_ENV",
   "GDRIVE_RAG_PROFILE_ID",
-  "GDRIVE_RAG_ALLOWED_OWNER_PROFILE_IDS",
-  "GDRIVE_RAG_ALLOWED_BUSINESS_FUNCTIONS",
-  "GDRIVE_RAG_ALLOWED_PARA_CATEGORIES",
+  "GDRIVE_RAG_ALLOWED_FOLDER_IDS",
   "GEMINI_API_KEY",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
@@ -487,8 +488,9 @@ with those transport values rather than copying an unverified client-specific sn
 - The fingerprint stores a provider/model/dimension/endpoint identity, never an API key. MCP status
   omits the endpoint.
 - Rotate MCP, Google, and embedding-provider credentials and restart after rotation.
-- Give each profile a different bearer token. Grant `owner_profile_ids=["*"]` only to an explicitly
-  trusted orchestrator; members normally receive `self,shared` plus their business function.
+- Give each profile a different bearer token. Grant only the Drive folder roots it needs; a trusted
+  orchestrator may receive the configured root, while members normally receive their own profile
+  or business-function folder IDs.
 - Tools are retrieval-only; Drive writes and index mutation are not exposed through MCP.
 - See [SECURITY.md](SECURITY.md) for reporting and deployment hardening.
 
@@ -500,9 +502,8 @@ with those transport values rather than copying an unverified client-specific sn
 - Slides, images, audio, video, shortcuts, and arbitrary binary formats are skipped.
 - The change feed is polling, not a push webhook. Freshness is bounded by the worker interval, and
   folder changes intentionally trigger a full reconciliation.
-- Authorization metadata comes from the configured folder hierarchy, not native per-file Drive ACL
-  replication. Keep sensitive documents under correctly classified roots and retain Drive ACLs as
-  the primary storage boundary.
+- Folder-ID ancestry scopes do not replicate native per-file Drive ACLs. Keep sensitive documents
+  under correctly granted roots and retain Drive ACLs as the primary storage boundary.
 - Search scores are heuristics, not probabilities. Tune the evidence threshold with domain-specific,
   multilingual evaluation before high-stakes use.
 - FTS tokenization is Unicode-aware but not a language-specific morphological analyzer. Languages
