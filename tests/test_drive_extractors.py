@@ -24,24 +24,6 @@ def test_google_sheet_is_rendered_with_sheet_names_and_tabular_values() -> None:
     assert "Sách\t5" in text
 
 
-def test_drive_folder_names_are_optional_path_metadata() -> None:
-    assert GoogleDriveSource._classify(("01-Orchestrator", "02-Finance", "03-Resources")) == {
-        "ownerProfileId": "orchestrator",
-        "businessFunction": "finance",
-        "paraCategory": "resources",
-    }
-    assert GoogleDriveSource._classify(("orchestrator", "finance")) == {
-        "ownerProfileId": "orchestrator",
-        "businessFunction": "finance",
-        "paraCategory": "",
-    }
-    assert GoogleDriveSource._classify(()) == {
-        "ownerProfileId": "",
-        "businessFunction": "",
-        "paraCategory": "",
-    }
-
-
 def test_relative_folder_path_records_root_and_every_ancestor_id() -> None:
     source = object.__new__(GoogleDriveSource)
     source.settings = SimpleNamespace(folder_id="root-id")

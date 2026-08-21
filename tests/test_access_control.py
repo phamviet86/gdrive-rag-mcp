@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
-from gdrive_rag_mcp.access import AccessPolicy, AccessScope
 from gdrive_rag_mcp.embeddings import HashingEmbedder
 from gdrive_rag_mcp.models import SourceDocument
 from gdrive_rag_mcp.retrieval import HybridRetriever
@@ -35,7 +31,7 @@ def add_scoped(
     store.replace_document(document, [text], embedder.embed_documents([text]))
 
 
-def test_search_filters_before_keyword_and_vector_scoring(tmp_path: Path) -> None:
+def test_file_id_scopes_keyword_and_vector_search_to_one_document(tmp_path: Path) -> None:
     embedder = HashingEmbedder(64)
     store = SQLiteStore(tmp_path / "index.db", embedder.dimensions)
     add_scoped(
@@ -52,67 +48,34 @@ def test_search_filters_before_keyword_and_vector_scoring(tmp_path: Path) -> Non
         "public payroll policy",
         ("root", "shared-profile", "shared-hr"),
     )
-    scope = AccessScope.create("member", ["shared-profile"])
-
     result = HybridRetriever(store, embedder, evidence_threshold=0.0).search(
-        "confidential payroll token", "root", scope=scope
+        "confidential payroll token", "shared-policy"
     )
     candidates = result["results"] or result["candidate_results"]
 
-    assert {item["document_id"] for item in candidates} == {"shared-policy"}
-    assert store.get_document("finance-secret", scope) is None
-    assert store.get_metadata("finance-secret", scope) is None
+    assert {item["file_id"] for item in candidates} == {"shared-policy"}
 
 
-def test_folder_id_scopes_to_all_descendants_and_cannot_escape_token_root(
-    tmp_path: Path,
-) -> None:
+def test_folder_id_scopes_to_all_descendants(tmp_path: Path) -> None:
     embedder = HashingEmbedder(32)
     store = SQLiteStore(tmp_path / "index.db", embedder.dimensions)
-    add_scoped(store, embedder, "hr", "quarterly policy", ("root", "profile-a", "hr"))
+    add_scoped(store, embedder, "hr", "quarterly policy", ("root", "profile-a", "profile-a-hr"))
     add_scoped(store, embedder, "sales", "quarterly policy", ("root", "profile-a", "sales"))
-    add_scoped(store, embedder, "other", "quarterly policy", ("root", "profile-b", "hr"))
-    scope = AccessScope.create("profile-a", ["profile-a"])
+    add_scoped(store, embedder, "other", "quarterly policy", ("root", "profile-b", "profile-b-hr"))
     retriever = HybridRetriever(store, embedder, evidence_threshold=0.0)
 
-    profile_results = retriever.search("quarterly policy", "profile-a", scope=scope)["results"]
-    hr_results = retriever.search("quarterly policy", "hr", scope=scope)["results"]
-    forbidden = retriever.search("quarterly policy", "profile-b", scope=scope)["results"]
+    root_results = retriever.search("quarterly policy", "root")["results"]
+    profile_results = retriever.search("quarterly policy", "profile-a")["results"]
+    hr_results = retriever.search("quarterly policy", "profile-a-hr")["results"]
+    unknown = retriever.search("quarterly policy", "unknown-id")["results"]
 
-    assert {item["document_id"] for item in profile_results} == {"hr", "sales"}
-    assert {item["document_id"] for item in hr_results} == {"hr"}
-    assert forbidden == []
-
-
-def test_access_policy_resolves_token_env_without_storing_plaintext(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    token = "a" * 64
-    monkeypatch.setenv("TOKEN_FINANCE", token)
-    path = tmp_path / "access-policy.json"
-    path.write_text(
-        json.dumps(
-            {
-                "principals": [
-                    {
-                        "profile_id": "finance",
-                        "token_env": "TOKEN_FINANCE",
-                        "allowed_folder_ids": ["finance-profile-folder-id"],
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    policy = AccessPolicy.from_file(path)
-
-    assert policy.authenticate(token) is not None
-    assert policy.authenticate("wrong") is None
-    assert token not in repr(policy.principals)
+    assert {item["file_id"] for item in root_results} == {"hr", "sales", "other"}
+    assert {item["file_id"] for item in profile_results} == {"hr", "sales"}
+    assert {item["file_id"] for item in hr_results} == {"hr"}
+    assert unknown == []
 
 
-def test_legacy_database_is_migrated_with_denyable_scope_columns(tmp_path: Path) -> None:
+def test_legacy_database_is_migrated_with_folder_ancestry(tmp_path: Path) -> None:
     path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as db:
         db.execute(
@@ -125,9 +88,6 @@ def test_legacy_database_is_migrated_with_denyable_scope_columns(tmp_path: Path)
     with sqlite3.connect(path) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
     assert {
-        "owner_profile_id",
-        "business_function",
-        "para_category",
         "relative_path",
         "parent_folder_id",
         "folder_ancestry",

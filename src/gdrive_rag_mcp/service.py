@@ -20,8 +20,21 @@ class KnowledgeService:
         self.embedder = create_embedder(settings)
         self.retriever = HybridRetriever(self.store, self.embedder, settings.evidence_threshold)
 
+    def require_index_ready(self) -> None:
+        if not self.settings.folder_id:
+            raise ValueError("GDRIVE_FOLDER_ID is required to serve the shared index")
+        indexed_root = self.store.get_state("drive_root_folder_id")
+        if indexed_root != self.settings.folder_id:
+            raise ValueError(
+                "The configured GDRIVE_FOLDER_ID does not match the indexed root. "
+                "Run `gdrive-rag-mcp sync --full` before serving."
+            )
+
     def sync(self) -> dict[str, object]:
         self.settings.require_sync()
+        indexed_root = self.store.get_state("drive_root_folder_id")
+        if indexed_root != self.settings.folder_id:
+            return self.full_sync()
         source = GoogleDriveSource(self.settings)
         indexer = Indexer(
             source,
@@ -55,5 +68,6 @@ class KnowledgeService:
         page_token = source.start_page_token()
         summary = indexer.sync()
         summary["mode"] = "full"
+        self.store.set_state("drive_root_folder_id", self.settings.folder_id)
         self.store.set_state("drive_start_page_token", page_token)
         return summary

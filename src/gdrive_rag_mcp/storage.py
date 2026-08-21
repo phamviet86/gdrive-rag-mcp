@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .access import AccessScope
 from .embeddings import EmbeddingIdentity
 from .models import DocumentMetadata, SearchHit, SourceDocument
 
@@ -87,9 +86,6 @@ class SQLiteStore:
                     checksum TEXT NOT NULL,
                     web_url TEXT NOT NULL,
                     indexed_at TEXT NOT NULL,
-                    owner_profile_id TEXT NOT NULL DEFAULT '',
-                    business_function TEXT NOT NULL DEFAULT '',
-                    para_category TEXT NOT NULL DEFAULT '',
                     relative_path TEXT NOT NULL DEFAULT '',
                     parent_folder_id TEXT NOT NULL DEFAULT '',
                     folder_ancestry TEXT NOT NULL DEFAULT '[]'
@@ -126,19 +122,16 @@ class SQLiteStore:
                 );
                 """
             )
-            self._migrate_document_scope(db)
+            self._migrate_document_paths(db)
             self._validate_embedding_identity(db)
             if self.vector_extension:
                 self._create_vector_table(db)
             db.commit()
 
     @staticmethod
-    def _migrate_document_scope(db: sqlite3.Connection) -> None:
+    def _migrate_document_paths(db: sqlite3.Connection) -> None:
         columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)")}
         for name in (
-            "owner_profile_id",
-            "business_function",
-            "para_category",
             "relative_path",
             "parent_folder_id",
             "folder_ancestry",
@@ -148,10 +141,7 @@ class SQLiteStore:
                 db.execute(
                     f"ALTER TABLE documents ADD COLUMN {name} TEXT NOT NULL DEFAULT {default}"
                 )
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_scope "
-            "ON documents(owner_profile_id,business_function,para_category)"
-        )
+        db.execute("DROP INDEX IF EXISTS idx_documents_scope")
 
     def _create_vector_table(self, db: sqlite3.Connection) -> None:
         db.execute(
@@ -225,17 +215,14 @@ class SQLiteStore:
                 row["id"]: "\0".join(
                     (
                         row["checksum"],
-                        row["owner_profile_id"],
-                        row["business_function"],
-                        row["para_category"],
                         row["relative_path"],
                         row["parent_folder_id"],
                         *json.loads(row["folder_ancestry"]),
                     )
                 )
                 for row in db.execute(
-                    "SELECT id,checksum,owner_profile_id,business_function,para_category,"
-                    "relative_path,parent_folder_id,folder_ancestry FROM documents"
+                    "SELECT id,checksum,relative_path,parent_folder_id,folder_ancestry "
+                    "FROM documents"
                 )
             }
 
@@ -261,15 +248,11 @@ class SQLiteStore:
             db.execute(
                 """INSERT INTO documents(
                        id,name,mime_type,modified_time,checksum,web_url,indexed_at,
-                       owner_profile_id,business_function,para_category,relative_path,
-                       parent_folder_id,folder_ancestry)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       relative_path,parent_folder_id,folder_ancestry)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name, mime_type=excluded.mime_type,
                    modified_time=excluded.modified_time, checksum=excluded.checksum,
                    web_url=excluded.web_url, indexed_at=excluded.indexed_at,
-                   owner_profile_id=excluded.owner_profile_id,
-                   business_function=excluded.business_function,
-                   para_category=excluded.para_category,
                    relative_path=excluded.relative_path,
                    parent_folder_id=excluded.parent_folder_id,
                    folder_ancestry=excluded.folder_ancestry""",
@@ -281,9 +264,6 @@ class SQLiteStore:
                     document.checksum,
                     document.web_url,
                     indexed_at,
-                    document.owner_profile_id,
-                    document.business_function,
-                    document.para_category,
                     document.relative_path,
                     document.parent_folder_id,
                     json.dumps(document.ancestor_folder_ids),
@@ -360,42 +340,24 @@ class SQLiteStore:
         return " OR ".join(f'"{token}"' for token in tokens)
 
     @staticmethod
-    def _scope_predicate(
-        scope: AccessScope | None,
-        scope_folder_id: str = "",
-        alias: str = "d",
-    ) -> tuple[str, list[str]]:
-        clauses: list[str] = []
-        parameters: list[str] = []
-        if scope is not None and "*" not in scope.allowed_folder_ids:
-            allowed = sorted(scope.allowed_folder_ids)
-            placeholders = ",".join("?" for _ in allowed)
-            clauses.append(
-                "EXISTS (SELECT 1 FROM document_folder_ancestors auth_scope "
-                f"WHERE auth_scope.document_id={alias}.id "
-                f"AND auth_scope.folder_id IN ({placeholders}))"
-            )
-            parameters.extend(allowed)
-        if scope_folder_id:
-            clauses.append(
-                "EXISTS (SELECT 1 FROM document_folder_ancestors requested_scope "
-                f"WHERE requested_scope.document_id={alias}.id "
-                "AND requested_scope.folder_id=?)"
-            )
-            parameters.append(scope_folder_id.strip())
-        return " AND ".join(clauses) if clauses else "1=1", parameters
+    def _scope_predicate(scope_id: str, alias: str = "d") -> tuple[str, list[str]]:
+        return (
+            f"({alias}.id=? OR EXISTS ("
+            "SELECT 1 FROM document_folder_ancestors requested_scope "
+            f"WHERE requested_scope.document_id={alias}.id AND requested_scope.folder_id=?))",
+            [scope_id.strip(), scope_id.strip()],
+        )
 
     def keyword_scores(
         self,
         query: str,
         limit: int,
-        scope: AccessScope | None = None,
-        scope_folder_id: str = "",
+        scope_id: str,
     ) -> dict[int, float]:
         expression = self._fts_query(query)
         if not expression:
             return {}
-        predicate, parameters = self._scope_predicate(scope, scope_folder_id)
+        predicate, parameters = self._scope_predicate(scope_id)
         with self.connection() as db:
             rows = db.execute(
                 "SELECT CAST(f.chunk_id AS INTEGER) AS id, bm25(chunks_fts) AS rank "
@@ -410,20 +372,12 @@ class SQLiteStore:
         self,
         query_embedding: Sequence[float],
         limit: int,
-        scope: AccessScope | None = None,
-        scope_folder_id: str = "",
+        scope_id: str,
     ) -> dict[int, float]:
         if len(query_embedding) != self.dimensions:
             raise ValueError(f"Embedding dimension must be {self.dimensions}")
         with self.connection() as db:
-            if self.vector_extension and scope is None:
-                rows = db.execute(
-                    "SELECT rowid AS id, distance FROM vec_chunks "
-                    "WHERE embedding MATCH ? AND k = ?",
-                    (_pack(query_embedding), limit),
-                )
-                return {row["id"]: max(0.0, 1.0 - float(row["distance"])) for row in rows}
-            predicate, parameters = self._scope_predicate(scope, scope_folder_id)
+            predicate, parameters = self._scope_predicate(scope_id)
             if self.vector_extension:
                 rows = db.execute(
                     "SELECT c.id,vec_distance_cosine(c.embedding,?) AS distance "
@@ -451,19 +405,17 @@ class SQLiteStore:
         self,
         scores: dict[int, float],
         limit: int,
-        scope: AccessScope | None = None,
-        scope_folder_id: str = "",
+        scope_id: str,
     ) -> list[SearchHit]:
         if not scores:
             return []
         ids = list(scores)
         placeholders = ",".join("?" for _ in ids)
-        predicate, parameters = self._scope_predicate(scope, scope_folder_id)
+        predicate, parameters = self._scope_predicate(scope_id)
         with self.connection() as db:
             rows = db.execute(
                 f"""SELECT c.id,c.document_id,c.position,c.text,d.name,d.modified_time,
-                           d.indexed_at,d.web_url,d.owner_profile_id,d.business_function,
-                           d.para_category,d.relative_path
+                           d.indexed_at,d.web_url,d.relative_path
                     FROM chunks c JOIN documents d ON d.id=c.document_id
                     WHERE c.id IN ({placeholders}) AND {predicate}""",
                 [*ids, *parameters],
@@ -479,23 +431,17 @@ class SQLiteStore:
                     indexed_at=row["indexed_at"],
                     web_url=row["web_url"],
                     position=row["position"],
-                    owner_profile_id=row["owner_profile_id"],
-                    business_function=row["business_function"],
-                    para_category=row["para_category"],
                     relative_path=row["relative_path"],
                 )
                 for row in rows
             ]
         return sorted(hits, key=lambda hit: hit.score, reverse=True)[:limit]
 
-    def get_document(
-        self, document_id: str, scope: AccessScope | None = None
-    ) -> dict[str, Any] | None:
-        predicate, parameters = self._scope_predicate(scope)
+    def get_document(self, document_id: str) -> dict[str, Any] | None:
         with self.connection() as db:
             document = db.execute(
-                f"SELECT d.* FROM documents d WHERE d.id=? AND {predicate}",
-                [document_id, *parameters],
+                "SELECT d.* FROM documents d WHERE d.id=?",
+                (document_id,),
             ).fetchone()
             if document is None:
                 return None
@@ -507,14 +453,13 @@ class SQLiteStore:
             ]
             return {"metadata": dict(document), "text": "\n\n".join(chunks)}
 
-    def get_metadata(
-        self, document_id: str, scope: AccessScope | None = None
-    ) -> DocumentMetadata | None:
-        predicate, parameters = self._scope_predicate(scope)
+    def get_metadata(self, document_id: str) -> DocumentMetadata | None:
         with self.connection() as db:
             row = db.execute(
-                f"SELECT d.* FROM documents d WHERE d.id=? AND {predicate}",
-                [document_id, *parameters],
+                """SELECT id,name,mime_type,modified_time,checksum,web_url,indexed_at,
+                          relative_path,parent_folder_id,folder_ancestry
+                   FROM documents WHERE id=?""",
+                (document_id,),
             ).fetchone()
             return DocumentMetadata(**dict(row)) if row else None
 
@@ -533,17 +478,10 @@ class SQLiteStore:
             row = db.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else None
 
-    def status(self, scope: AccessScope | None = None) -> dict[str, Any]:
-        predicate, parameters = self._scope_predicate(scope)
+    def status(self) -> dict[str, Any]:
         with self.connection() as db:
-            documents = db.execute(
-                f"SELECT COUNT(*) FROM documents d WHERE {predicate}", parameters
-            ).fetchone()[0]
-            chunks = db.execute(
-                "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id=c.document_id "
-                f"WHERE {predicate}",
-                parameters,
-            ).fetchone()[0]
+            documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             state_rows = db.execute("SELECT key,value,updated_at FROM sync_state").fetchall()
             identity_row = db.execute(
                 "SELECT value FROM index_metadata WHERE key='embedding_identity'"
@@ -561,6 +499,9 @@ class SQLiteStore:
         return {
             "documents": documents,
             "chunks": chunks,
+            "drive_root_folder_id": (
+                state["drive_root_folder_id"]["value"] if "drive_root_folder_id" in state else None
+            ),
             "last_sync": state.get("last_sync"),
             "vector_backend": "sqlite-vec" if self.vector_extension else "sqlite-python-fallback",
             "embedding_identity": public_identity,

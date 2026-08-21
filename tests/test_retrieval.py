@@ -36,7 +36,7 @@ def test_hybrid_search_ranks_relevant_text_and_cites_source(tmp_path: Path) -> N
     )
 
     assert result["evidence"]["sufficient"] is True
-    assert result["results"][0]["document_id"] == "tax"
+    assert result["results"][0]["file_id"] == "tax"
     assert result["results"][0]["citation"]["url"].startswith("https://drive.google.com/")
     assert "modified_time" in result["results"][0]["citation"]
 
@@ -65,7 +65,7 @@ def test_keyword_signal_can_rescue_exact_term(tmp_path: Path) -> None:
         "80/2021/TT-BTC", "test-root"
     )
     candidates = result["results"] or result["candidate_results"]
-    assert candidates[0]["document_id"] == "exact"
+    assert candidates[0]["file_id"] == "exact"
 
 
 @pytest.mark.parametrize(
@@ -88,4 +88,4 @@ def test_unicode_hybrid_retrieval_across_multiple_scripts(
     result = HybridRetriever(store, embedder, evidence_threshold=0.15).search(query, "test-root")
     candidates = result["results"] or result["candidate_results"]
 
-    assert candidates[0]["document_id"] == expected
+    assert candidates[0]["file_id"] == expected

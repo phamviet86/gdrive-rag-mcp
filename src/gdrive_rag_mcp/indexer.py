@@ -32,9 +32,6 @@ class Indexer:
         return "\0".join(
             (
                 document.checksum,
-                document.owner_profile_id,
-                document.business_function,
-                document.para_category,
                 document.relative_path,
                 document.parent_folder_id,
                 *document.ancestor_folder_ids,
@@ -74,7 +71,6 @@ class Indexer:
             "unchanged": unchanged,
             "deleted": deleted,
             "skipped": skipped,
-            "scope_skipped": int(getattr(self.source, "scope_skipped", 0)),
             "completed_at": datetime.now(UTC).isoformat(),
         }
         self.store.set_state("last_sync", summary)
@@ -103,7 +99,6 @@ class Indexer:
             "unchanged": unchanged,
             "deleted": deleted,
             "skipped": skipped,
-            "scope_skipped": batch.scope_skipped,
             "completed_at": datetime.now(UTC).isoformat(),
         }
         self.store.set_state("last_sync", summary)

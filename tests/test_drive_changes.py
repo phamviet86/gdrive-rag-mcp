@@ -40,9 +40,6 @@ def document(document_id: str) -> SourceDocument:
         checksum="checksum",
         web_url=f"https://drive.google.com/open?id={document_id}",
         text="policy",
-        owner_profile_id="shared",
-        business_function="operations",
-        para_category="areas",
         relative_path="shared/operations/areas/policy.md",
         parent_folder_id="areas-folder",
         ancestor_folder_ids=("root", "shared", "operations", "areas-folder"),
@@ -52,7 +49,6 @@ def document(document_id: str) -> SourceDocument:
 def test_changes_batch_tracks_updates_deletes_and_new_token() -> None:
     source = object.__new__(GoogleDriveSource)
     source.settings = SimpleNamespace(shared_drive_id=None)
-    source.scope_skipped = 0
     source.service = Service(
         {
             "changes": [
@@ -75,7 +71,6 @@ def test_changes_batch_tracks_updates_deletes_and_new_token() -> None:
 def test_folder_change_requests_full_reconciliation() -> None:
     source = object.__new__(GoogleDriveSource)
     source.settings = SimpleNamespace(shared_drive_id=None)
-    source.scope_skipped = 0
     source.service = Service(
         {
             "changes": [{"fileId": "folder", "file": {"mimeType": FOLDER_MIME}}],

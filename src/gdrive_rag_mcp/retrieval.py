@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .access import AccessScope
 from .embeddings import Embedder
 from .storage import SQLiteStore
 
@@ -23,26 +22,23 @@ class HybridRetriever:
     def search(
         self,
         query: str,
-        scope_folder_id: str,
+        scope_id: str,
         limit: int = 5,
-        scope: AccessScope | None = None,
     ) -> dict[str, Any]:
         if not query.strip():
             raise ValueError("query must not be empty")
-        if not scope_folder_id.strip():
-            raise ValueError("scope_folder_id must not be empty")
+        if not scope_id.strip():
+            raise ValueError("scope_id must not be empty")
         candidate_limit = max(limit * 4, 20)
         keyword = self.store.keyword_scores(
             query,
             candidate_limit,
-            scope,
-            scope_folder_id,
+            scope_id,
         )
         vector = self.store.vector_scores(
             self.embedder.embed_query(query),
             candidate_limit,
-            scope,
-            scope_folder_id,
+            scope_id,
         )
         candidate_ids = set(keyword) | set(vector)
         scores = {
@@ -53,17 +49,15 @@ class HybridRetriever:
         hits = self.store.search_hits(
             scores,
             limit,
-            scope,
-            scope_folder_id,
+            scope_id,
         )
         top_score = hits[0].score if hits else 0.0
         sufficient = bool(hits) and top_score >= self.evidence_threshold
         return {
             "query": query,
             "applied_scope": {
-                "caller_profile_id": scope.profile_id if scope else "unrestricted-local",
-                "scope_folder_id": scope_folder_id,
-                "includes_descendants": True,
+                "scope_id": scope_id,
+                "behavior": "file_only_or_folder_with_descendants",
             },
             "evidence": {
                 "sufficient": sufficient,

@@ -47,7 +47,6 @@ def test_incremental_add_update_and_delete(tmp_path: Path) -> None:
         "unchanged": 0,
         "deleted": 0,
         "skipped": 0,
-        "scope_skipped": 0,
         "completed_at": "ignored",
     }
 

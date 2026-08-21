@@ -13,9 +13,6 @@ class SourceDocument:
     checksum: str
     web_url: str
     text: str
-    owner_profile_id: str = ""
-    business_function: str = ""
-    para_category: str = ""
     relative_path: str = ""
     parent_folder_id: str = ""
     ancestor_folder_ids: tuple[str, ...] = ()
@@ -30,9 +27,6 @@ class DocumentMetadata:
     checksum: str
     web_url: str
     indexed_at: str
-    owner_profile_id: str
-    business_function: str
-    para_category: str
     relative_path: str
     parent_folder_id: str
     folder_ancestry: str
@@ -49,23 +43,15 @@ class SearchHit:
     indexed_at: str
     web_url: str
     position: int
-    owner_profile_id: str
-    business_function: str
-    para_category: str
     relative_path: str
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "chunk_id": self.chunk_id,
-            "document_id": self.document_id,
+            "file_id": self.document_id,
             "document_name": self.document_name,
             "text": self.text,
             "score": round(self.score, 4),
-            "scope": {
-                "owner_profile_id": self.owner_profile_id,
-                "business_function": self.business_function,
-                "para_category": self.para_category,
-            },
             "citation": {
                 "url": self.web_url,
                 "relative_path": self.relative_path,
@@ -82,4 +68,3 @@ class DriveChangeBatch:
     delete_document_ids: frozenset[str]
     new_start_page_token: str
     full_rescan_required: bool = False
-    scope_skipped: int = 0

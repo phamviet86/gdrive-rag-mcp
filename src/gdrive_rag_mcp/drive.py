@@ -16,7 +16,6 @@ from googleapiclient.errors import HttpError
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from .access import normalize_para, normalize_scope_value
 from .config import Settings
 from .models import DriveChangeBatch, SourceDocument
 
@@ -60,7 +59,6 @@ def google_credentials(settings: Settings, interactive: bool = False) -> Any:
 class GoogleDriveSource:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.scope_skipped = 0
         self.service = build(
             "drive", "v3", credentials=google_credentials(settings), cache_discovery=False
         )
@@ -113,24 +111,10 @@ class GoogleDriveSource:
                         )
                     )
                 elif item["mimeType"] in SUPPORTED_MIMES:
-                    item.update(self._classify(folder_path))
                     item["relativePath"] = "/".join((*folder_path, item["name"]))
                     item["parentFolderId"] = folder_id
                     item["ancestorFolderIds"] = ancestor_folder_ids
                     yield item
-
-    @staticmethod
-    def _classify(folder_path: tuple[str, ...]) -> dict[str, str]:
-        owner = normalize_scope_value(folder_path[0]) if folder_path else ""
-        business_function = normalize_scope_value(folder_path[1]) if len(folder_path) > 1 else ""
-        para_category = normalize_para(folder_path[2]) if len(folder_path) > 2 else ""
-        if para_category not in {"projects", "areas", "resources", "archives"}:
-            para_category = ""
-        return {
-            "ownerProfileId": owner,
-            "businessFunction": business_function,
-            "paraCategory": para_category,
-        }
 
     def _bytes(self, file_id: str, mime_type: str) -> bytes:
         if mime_type == GOOGLE_DOC:
@@ -163,9 +147,6 @@ class GoogleDriveSource:
             checksum=checksum,
             web_url=item.get("webViewLink") or f"https://drive.google.com/open?id={item['id']}",
             text=self._extract(content, item["mimeType"]),
-            owner_profile_id=item["ownerProfileId"],
-            business_function=item["businessFunction"],
-            para_category=item["paraCategory"],
             relative_path=item["relativePath"],
             parent_folder_id=item["parentFolderId"],
             ancestor_folder_ids=tuple(item["ancestorFolderIds"]),
@@ -264,7 +245,6 @@ class GoogleDriveSource:
         if resolved_path is None:
             return None
         folder_path, ancestor_folder_ids = resolved_path
-        item.update(self._classify(folder_path))
         item["relativePath"] = "/".join((*folder_path, item["name"]))
         item["parentFolderId"] = str(item["parents"][0])
         item["ancestorFolderIds"] = ancestor_folder_ids
@@ -276,7 +256,6 @@ class GoogleDriveSource:
         full_rescan_required = False
         next_token: str | None = page_token
         new_start_page_token = ""
-        initial_skipped = self.scope_skipped
         while next_token:
             kwargs: dict[str, Any] = {
                 "pageToken": next_token,
@@ -320,7 +299,6 @@ class GoogleDriveSource:
             delete_document_ids=frozenset(deleted),
             new_start_page_token=new_start_page_token or page_token,
             full_rescan_required=full_rescan_required,
-            scope_skipped=self.scope_skipped - initial_skipped,
         )
 
 

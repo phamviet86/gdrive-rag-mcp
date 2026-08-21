@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .access import AccessPolicy, AccessScope
 from .embeddings import EmbeddingIdentity
 
 SUPPORTED_EMBED_PROVIDERS = {"gemini", "openai-compatible", "sentence-transformers"}
@@ -29,21 +28,6 @@ def _bool(name: str, default: bool) -> bool:
     if value.casefold() in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
-
-
-def _csv(name: str, default: str) -> tuple[str, ...]:
-    values = tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
-    if not values:
-        raise ValueError(f"{name} must contain at least one value")
-    return values
-
-
-def _csv_or(name: str, fallback: str) -> tuple[str, ...]:
-    return (
-        _csv(name, fallback)
-        if os.getenv(name, "").strip()
-        else tuple(item.strip() for item in fallback.split(",") if item.strip())
-    )
 
 
 def _provider(value: str) -> str:
@@ -84,9 +68,6 @@ class Settings:
     oauth_client_file: Path | None = None
     oauth_token_file: Path = Path("data/google-oauth-token.json")
     bearer_token: str = ""
-    access_policy_file: Path | None = None
-    profile_id: str = "default"
-    allowed_folder_ids: tuple[str, ...] = ("*",)
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -131,11 +112,6 @@ class Settings:
                 os.getenv("GOOGLE_OAUTH_TOKEN_FILE", "data/google-oauth-token.json")
             ),
             bearer_token=os.getenv("GDRIVE_RAG_BEARER_TOKEN", ""),
-            access_policy_file=path_or_none("GDRIVE_RAG_ACCESS_POLICY_FILE"),
-            profile_id=os.getenv("GDRIVE_RAG_PROFILE_ID", "default"),
-            allowed_folder_ids=_csv_or(
-                "GDRIVE_RAG_ALLOWED_FOLDER_IDS", os.getenv("GDRIVE_FOLDER_ID", "") or "*"
-            ),
             host=os.getenv("GDRIVE_RAG_HOST", "127.0.0.1"),
             port=_int("GDRIVE_RAG_PORT", 8000),
         )
@@ -168,7 +144,6 @@ class Settings:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.embed_api_key_env):
             raise ValueError("GDRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name")
         _profile_path(self.index_profile)
-        self.default_access_scope()
 
     def embedding_api_key(self, required: bool) -> str:
         value = os.getenv(self.embed_api_key_env, "")
@@ -188,17 +163,6 @@ class Settings:
         return EmbeddingIdentity(
             self.embed_provider, self.embed_model, self.embed_dimensions, endpoint
         )
-
-    def default_access_scope(self) -> AccessScope:
-        return AccessScope.create(
-            self.profile_id,
-            self.allowed_folder_ids,
-        )
-
-    def access_policy(self) -> AccessPolicy:
-        if self.access_policy_file:
-            return AccessPolicy.from_file(self.access_policy_file)
-        return AccessPolicy.from_single_token(self.bearer_token, self.default_access_scope())
 
     def require_sync(self) -> None:
         missing = []

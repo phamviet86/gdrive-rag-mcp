@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gdrive-rag-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "A local-first Google Drive hybrid retrieval MCP server"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from gdrive_rag_mcp.access import current_scope
 from gdrive_rag_mcp.server import BearerAuthMiddleware, create_http_app, create_mcp_server
 
 
@@ -38,11 +37,11 @@ async def test_bearer_middleware_rejects_missing_token() -> None:
 
 
 @pytest.mark.anyio
-async def test_bearer_middleware_binds_authenticated_profile_scope() -> None:
-    observed: list[str] = []
+async def test_bearer_middleware_accepts_the_shared_service_token() -> None:
+    observed: list[bool] = []
 
     async def app(scope: object, receive: object, send: object) -> None:
-        observed.append(current_scope().profile_id)
+        observed.append(True)
 
     async def receive() -> dict[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -63,7 +62,7 @@ async def test_bearer_middleware_binds_authenticated_profile_scope() -> None:
         send,  # type: ignore[arg-type]
     )
 
-    assert observed == ["legacy-http"]
+    assert observed == [True]
 
 
 def test_sample_configuration_contains_placeholders_only() -> None:
@@ -79,13 +78,9 @@ def test_sample_configuration_contains_placeholders_only() -> None:
         "token*.json",
         "service-account*.json",
         "secrets/",
-        "access-policy.json",
         "*.db",
     ):
         assert pattern in ignore
-    policy = Path("access-policy.example.json").read_text(encoding="utf-8")
-    assert "token_env" in policy
-    assert "Bearer " not in policy
 
 
 @pytest.mark.anyio
@@ -100,4 +95,7 @@ async def test_mcp_tools_have_stable_names_and_read_only_annotations() -> None:
     }
     assert all(tool.annotations and tool.annotations.read_only_hint for tool in tools)
     search_tool = next(tool for tool in tools if tool.name == "search_knowledge")
-    assert {"query", "scope_folder_id"} <= set(search_tool.input_schema["required"])
+    assert {"query", "scope_id"} <= set(search_tool.input_schema["required"])
+    for name in ("get_document", "get_document_metadata"):
+        tool = next(item for item in tools if item.name == name)
+        assert "file_id" in tool.input_schema["required"]

@@ -109,10 +109,11 @@ def serve(
     """Run MCP over local stdio or authenticated Streamable HTTP."""
     settings = Settings.from_env()
     service = KnowledgeService(settings)
+    service.require_index_ready()
     if transport is Transport.stdio:
-        create_mcp_server(service, settings.default_access_scope()).run(transport="stdio")
+        create_mcp_server(service).run(transport="stdio")
         return
-    http_app = create_http_app(service, settings.access_policy())
+    http_app = create_http_app(service, settings.bearer_token)
     uvicorn.run(http_app, host=settings.host, port=settings.port)
 
 

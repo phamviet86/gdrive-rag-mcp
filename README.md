@@ -3,10 +3,9 @@
 [![CI](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/phamviet86/gdrive-rag-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local-first, scope-aware Google Drive hybrid index exposed through the Model Context Protocol
-(MCP). Choose an embedding provider and model that fit your languages, privacy boundary, and
-infrastructure; then query one durable index from multiple Hermes profiles or other MCP clients
-without granting every caller access to every document.
+A local-first Google Drive hybrid index exposed as one shared Model Context Protocol (MCP) service.
+Choose an embedding provider and model that fit your languages, privacy boundary, and
+infrastructure; then let every Hermes profile or other MCP client query the same durable index.
 
 Google Drive/Workspace remains the read-only source of truth. The service stores extracted chunks,
 normalized embeddings, metadata, checksums, sync state, and index data—not downloaded source files.
@@ -20,9 +19,9 @@ It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking b
 
 - Recursively reads one configured Drive folder or Shared Drive scope with the read-only API.
 - Stores every ancestor folder ID so any folder can be used as a recursive search boundary.
-- Derives optional `owner_profile_id`, `business_function`, and PARA labels for display only.
-- Authenticates the caller before tool execution and filters both FTS5 and vector candidates before
-  ranking. A profile cannot widen its scope with tool arguments.
+- Stores the relative Drive path for readable citations without deriving profile-specific scopes.
+- Filters both FTS5 and vector candidates by a caller-supplied Drive folder or file ID before
+  ranking.
 - Extracts Google Docs, Google Sheets, text/Markdown, text-based PDFs, and DOCX.
 - Supports Gemini, any verified OpenAI-compatible `/embeddings` endpoint, and optional local
   Sentence Transformers behind one embedding protocol.
@@ -33,7 +32,7 @@ It requires no LlamaCloud and uses LlamaIndex only at the replaceable chunking b
 - Prevents vectors from different providers, models, endpoints, or dimensions from sharing an
   index by recording and validating an embedding fingerprint.
 - Returns citations, source modified/indexed times, and a conservative evidence decision.
-- Exposes the same read-only tools over profile-scoped stdio and bearer-protected Streamable HTTP.
+- Exposes the same shared read-only tools over stdio and bearer-protected Streamable HTTP.
 
 ## Architecture
 
@@ -48,7 +47,7 @@ flowchart LR
     E -->|Local Sentence Transformers| V
     L --> S[(SQLite documents + FTS5)]
     V --> Q[(sqlite-vec / cosine fallback)]
-    S --> R[Authorized pre-filter]
+    S --> R[Folder or file ID pre-filter]
     Q --> R
     R --> H[Hybrid ranking + evidence gate]
     H --> M[Agent-neutral MCP tools]
@@ -56,7 +55,7 @@ flowchart LR
 ```
 
 Google, embedding-provider, and local-model credentials/resources stay with the service operator.
-Remote clients receive only an MCP URL and a profile-specific bearer token.
+Remote clients receive only an MCP URL and the shared service bearer token.
 
 ## Embedding providers
 
@@ -218,38 +217,17 @@ choice, not an authorization schema. A profile/business/PARA structure remains u
 
 Every supported file below the configured root is indexed regardless of depth. The index records
 the configured root ID and every descendant folder ID in that file's ancestry. Therefore one
-`scope_folder_id` always means “this folder and all descendants”:
+`scope_id` accepts either a Drive folder ID or an indexed file ID:
 
 - a profile-owner folder ID searches the entire profile tree;
 - a business-function folder ID searches that function and every nested PARA folder;
 - any deeper folder ID narrows the same operation to that subtree.
+- a file ID searches only that indexed file.
 
-Two-digit prefixes and the first three path levels may still produce owner/function/PARA labels in
-results, but those names never grant access and are not required.
-
-Each stdio process has one immutable caller identity:
-
-```bash
-export GDRIVE_RAG_PROFILE_ID=finance
-export GDRIVE_RAG_ALLOWED_FOLDER_IDS=finance_profile_folder_id,shared_finance_folder_id
-```
-
-Each allowed ID grants only that folder and its descendants. The caller must also pass a
-`scope_folder_id` on every search. SQL applies both boundaries before FTS5 or vector ranking, so a
-folder outside the token's granted roots returns no documents.
-
-For HTTP with multiple profiles, copy `access-policy.example.json` to an operator-only location.
-The policy contains token environment-variable names, never token values:
-
-```bash
-cp access-policy.example.json ./secrets/access-policy.json
-export GDRIVE_RAG_ACCESS_POLICY_FILE=./secrets/access-policy.json
-export GDRIVE_RAG_TOKEN_ORCHESTRATOR="$(openssl rand -hex 32)"
-export GDRIVE_RAG_TOKEN_FINANCE="$(openssl rand -hex 32)"
-```
-
-The server authenticates the bearer token and derives the profile scope before invoking an MCP
-tool. Do not accept a caller-supplied profile ID as identity.
+Folder names remain visible only through the relative path. There is no per-profile index, scope
+configuration, access policy, or database. `GDRIVE_FOLDER_ID` alone defines the tree indexed by the
+worker. IDs outside that indexed tree produce no search results. The server refuses to start if
+the configured root differs from the root recorded by the last full sync.
 
 ## Build, refresh, and migrate an index
 
@@ -289,13 +267,16 @@ gdrive-rag-mcp reindex --yes
 The command deletes only generated index data in the selected database and performs a full Drive
 sync. It does not modify Drive. An empty legacy database is stamped automatically.
 
-Version 0.3 adds scope columns to existing databases automatically. Existing rows initially have
-empty scope values and are invisible to scoped callers. Run `gdrive-rag-mcp sync --full` after an
-upgrade so every current Drive path is classified before serving profiles.
+Version 0.3 added path classification columns to existing databases. Version 0.5 no longer uses
+those legacy columns.
 
 Version 0.4 replaces label-based authorization with recursive folder-ID ancestry. The schema
 migrates automatically, but old rows have no ancestry entries. Run `gdrive-rag-mcp sync --full`
 before serving so each document records the configured root and all parent folder IDs.
+
+Version 0.5 makes the service and index shared across all clients, removes per-profile access
+configuration, and accepts one folder-or-file `scope_id` per search. Existing 0.4 ancestry data is
+compatible; no rebuild is required when it is already populated.
 
 To keep multiple intentional indexes, use named profiles or explicit paths:
 
@@ -315,17 +296,18 @@ All tool names and instructions are agent-neutral and marked read-only.
 
 | Tool | Purpose |
 |---|---|
-| `search_knowledge(query, scope_folder_id, limit)` | Search one Drive folder ID and all descendants with citations, freshness, and an evidence decision |
-| `get_document(document_id)` | Resolve an authorized Drive ID and instruct the profile to read the current source through Google Workspace |
-| `get_document_metadata(document_id)` | Authorized URL, scope, checksum, modified/indexed times |
-| `check_index_status()` | Caller-visible counts, last sync, vector backend, and embedding fingerprint |
+| `search_knowledge(query, scope_id, limit)` | Search one indexed file ID, or one folder ID and all descendants, with citations and an evidence decision |
+| `get_document(file_id)` | Resolve an indexed Drive ID and instruct the caller to read the current source through Google Workspace |
+| `get_document_metadata(file_id)` | URL, relative path, ancestor folder IDs, checksum, and modified/indexed times |
+| `check_index_status()` | Shared counts, last sync, vector backend, and embedding fingerprint |
 
 Weak hits are placed in `candidate_results` for diagnostics; normal `results` remain empty when the
-top score is below `GDRIVE_RAG_EVIDENCE_THRESHOLD`.
+top score is below `GDRIVE_RAG_EVIDENCE_THRESHOLD`. Each hit returns its indexed `file_id` for a
+current Google Workspace read.
 
 Search returns indexed excerpts, not a second authoritative document. `get_document` deliberately
-does not return reconstructed full cached text. Use its authorized Drive ID with the profile's
-Google Workspace tool when the complete or current document is required.
+does not return reconstructed full cached text. Use its indexed Drive ID with Google Workspace
+when the complete or current document is required.
 
 ## Local mode (stdio)
 
@@ -356,8 +338,6 @@ mcp_servers:
       GDRIVE_RAG_EMBED_API_KEY_ENV: "${GDRIVE_RAG_EMBED_API_KEY_ENV}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
-      GDRIVE_RAG_PROFILE_ID: "finance"
-      GDRIVE_RAG_ALLOWED_FOLDER_IDS: "${FINANCE_PROFILE_FOLDER_ID},${SHARED_FINANCE_FOLDER_ID}"
     timeout: 120
     connect_timeout: 30
     supports_parallel_tool_calls: true
@@ -382,8 +362,6 @@ env_vars = [
   "GDRIVE_RAG_EMBED_DIMENSIONS",
   "GDRIVE_RAG_EMBED_BASE_URL",
   "GDRIVE_RAG_EMBED_API_KEY_ENV",
-  "GDRIVE_RAG_PROFILE_ID",
-  "GDRIVE_RAG_ALLOWED_FOLDER_IDS",
   "GEMINI_API_KEY",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
@@ -399,17 +377,14 @@ Codex's current stdio forwarding and remote bearer-token keys are documented in 
 ## Server mode (Streamable HTTP)
 
 ```bash
-export GDRIVE_RAG_ACCESS_POLICY_FILE=./secrets/access-policy.json
-export GDRIVE_RAG_TOKEN_ORCHESTRATOR="$(openssl rand -hex 32)"
-export GDRIVE_RAG_TOKEN_FINANCE="$(openssl rand -hex 32)"
+export GDRIVE_RAG_BEARER_TOKEN="$(openssl rand -hex 32)"
 gdrive-rag-mcp serve --transport http
 ```
 
 The endpoint is `http://127.0.0.1:8000/mcp`; `GET /health` is an unauthenticated liveness check that
-returns no index details. Every `/mcp` request requires `Authorization: Bearer ...`.
-The matched token determines the immutable profile and allowed Drive scopes. A single
-`GDRIVE_RAG_BEARER_TOKEN` plus the stdio scope variables remains available for a one-profile
-deployment, but it is not the recommended multi-profile configuration.
+returns no index details. Every `/mcp` request requires the same shared
+`Authorization: Bearer ...` service token. The token protects the MCP endpoint; it does not select
+a Hermes profile or document scope.
 
 Terminate TLS at a trusted reverse proxy/load balancer, preserve the Authorization header, restrict
 inbound networks, and bind the application only to the proxy network. Never expose plain HTTP or put
@@ -432,9 +407,6 @@ docker compose up -d app worker
 ```
 
 The `worker` consumes Drive changes every five minutes and performs a full reconciliation daily.
-For the multi-profile policy example, set
-`GDRIVE_RAG_ACCESS_POLICY_FILE=/run/secrets/access-policy.json` because Compose mounts the local
-`secrets/` directory at `/run/secrets`.
 
 For local Sentence Transformers, set `GDRIVE_RAG_EXTRAS=sentence-transformers` before building and
 choose a suitable image/runtime for the hardware. For separate container indexes, set distinct
@@ -480,7 +452,7 @@ with those transport values rather than copying an unverified client-specific sn
 ## Security and data handling
 
 - `.env`, databases, OAuth tokens, client secrets, service-account keys, downloaded files, model
-  caches, access-policy instances, and generated indexes must remain outside source control.
+  caches, and generated indexes must remain outside source control.
 - SQLite contains extracted source text. Encrypt disks/backups and restrict OS/volume access.
 - Hosted embedding providers receive extracted chunks during sync and queries during search. Review
   their data terms and residency. Use a suitable local model when data must not leave the host.
@@ -488,9 +460,8 @@ with those transport values rather than copying an unverified client-specific sn
 - The fingerprint stores a provider/model/dimension/endpoint identity, never an API key. MCP status
   omits the endpoint.
 - Rotate MCP, Google, and embedding-provider credentials and restart after rotation.
-- Give each profile a different bearer token. Grant only the Drive folder roots it needs; a trusted
-  orchestrator may receive the configured root, while members normally receive their own profile
-  or business-function folder IDs.
+- Protect remote HTTP with one rotated shared-service bearer token. All authorized Hermes profiles
+  can query any folder or file contained in the configured index root.
 - Tools are retrieval-only; Drive writes and index mutation are not exposed through MCP.
 - See [SECURITY.md](SECURITY.md) for reporting and deployment hardening.
 
@@ -502,8 +473,9 @@ with those transport values rather than copying an unverified client-specific sn
 - Slides, images, audio, video, shortcuts, and arbitrary binary formats are skipped.
 - The change feed is polling, not a push webhook. Freshness is bounded by the worker interval, and
   folder changes intentionally trigger a full reconciliation.
-- Folder-ID ancestry scopes do not replicate native per-file Drive ACLs. Keep sensitive documents
-  under correctly granted roots and retain Drive ACLs as the primary storage boundary.
+- The shared index does not replicate native per-file Drive ACLs or isolate Hermes profiles. Keep
+  only documents intended for all tool users under `GDRIVE_FOLDER_ID` and retain Drive ACLs as the
+  primary storage boundary.
 - Search scores are heuristics, not probabilities. Tune the evidence threshold with domain-specific,
   multilingual evaluation before high-stakes use.
 - FTS tokenization is Unicode-aware but not a language-specific morphological analyzer. Languages
