@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
   "google-api-python-client==2.198.0",
   "google-auth-oauthlib==1.4.0",
-  "google-genai==1.47.0",
+  "google-genai==2.18.1",
   "httpx==0.28.1",
   "llama-index-core==0.14.16",
   "mcp==2.0.0",
