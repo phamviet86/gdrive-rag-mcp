@@ -99,6 +99,9 @@ For the local provider, install `pip install -e '.[sentence-transformers]'` inst
 not automatically parse `.env`; load it with your shell or process manager. For example,
 `set -a; . ./.env; set +a` in a trusted interactive shell. Never commit `.env`.
 
+Chunking uses a built-in deterministic sentence tokenizer at the LlamaIndex boundary, so normal
+operation does not require NLTK corpora or depend on how package files are linked on disk.
+
 ## Configure an embedding provider
 
 Secret values come from the environment variable named by
