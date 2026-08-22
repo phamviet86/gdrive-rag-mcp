@@ -1,33 +1,80 @@
 name: Bug report
-description: Report a reproducible defect without secrets or source data
+description: Report a reproducible problem that is not a security vulnerability.
 title: "[Bug]: "
-labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: "Never include credentials, bearer tokens, private Drive links, or document text."
-  - type: textarea
-    id: description
-    attributes:
-      label: Description
-      description: What happened, and what did you expect?
-    validations:
-      required: true
-  - type: textarea
-    id: reproduce
-    attributes:
-      label: Reproduction
-      description: Minimal steps using synthetic data only.
-    validations:
-      required: true
+      value: |
+        Thanks for helping improve Google Drive RAG MCP.
+        Do not include OAuth tokens, API keys, client secrets, private Drive IDs/links, document
+        content, production database rows, or unredacted logs. Report security vulnerabilities
+        through the private link in the issue chooser.
+
   - type: input
     id: version
     attributes:
       label: Version or commit
+      description: Package version or Git commit where the problem occurs.
+      placeholder: "0.5.0 or commit SHA"
     validations:
       required: true
-  - type: textarea
-    id: environment
+
+  - type: dropdown
+    id: python
     attributes:
-      label: Environment
-      description: OS, Python version, local/server mode, and sqlite vector backend.
+      label: Python version
+      options:
+        - "3.11"
+        - "3.12"
+        - "3.13"
+        - "3.14"
+        - "Other"
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: MCP client and operating system
+      placeholder: "Codex on macOS 15, Hermes on Ubuntu 24.04, etc."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use fake Drive IDs and synthetic content; redact account data, endpoint URLs, and private paths.
+      placeholder: |
+        1. Configure the server with placeholders...
+        2. Run the command or call the tool...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only minimal sanitized JSONL stderr or traceback output. Never paste token files or Drive content.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I checked the README troubleshooting section and existing issues.
+          required: true
+        - label: I removed credentials, private Drive data, local paths, and other sensitive information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

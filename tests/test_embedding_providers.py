@@ -56,11 +56,47 @@ def test_provider_configuration_validation() -> None:
         ).validate_embedding()
 
 
-def test_named_profile_derives_separate_database_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_DRIVE_RAG_INDEX_PROFILE", "local-multilingual")
+def test_database_path_defaults_to_shared_index(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLE_DRIVE_RAG_DB_PATH", raising=False)
     settings = Settings.from_env()
-    assert settings.db_path.as_posix() == "data/index-local-multilingual.db"
+    assert settings.db_path.as_posix() == "data/index.db"
+
+
+def test_explicit_database_path_overrides_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_DRIVE_RAG_DB_PATH", "/var/lib/google-drive-rag/shared.db")
+    settings = Settings.from_env()
+    assert settings.db_path.as_posix() == "/var/lib/google-drive-rag/shared.db"
+
+
+def test_database_and_token_paths_expand_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/tmp/google-drive-rag-home")
+    monkeypatch.setenv("GOOGLE_DRIVE_RAG_DB_PATH", "~/indexes/shared.db")
+    monkeypatch.setenv("GOOGLE_TOKEN_FILE", "~/.config/google-drive-rag/token.json")
+
+    settings = Settings.from_env()
+
+    assert settings.db_path.as_posix() == "/tmp/google-drive-rag-home/indexes/shared.db"
+    assert settings.token_file.as_posix() == (
+        "/tmp/google-drive-rag-home/.config/google-drive-rag/token.json"
+    )
+
+
+def test_drive_retry_and_download_defaults_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GOOGLE_DRIVE_API_NUM_RETRIES", raising=False)
+    monkeypatch.delenv("GOOGLE_DRIVE_DOWNLOAD_CHUNK_SIZE", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.drive_api_num_retries == 5
+    assert settings.drive_download_chunk_size == 8 * 1024 * 1024
+    with pytest.raises(ValueError, match="0 to 10"):
+        Settings(drive_api_num_retries=-1).validate_embedding()
+    with pytest.raises(ValueError, match="0 to 10"):
+        Settings(drive_api_num_retries=11).validate_embedding()
+    with pytest.raises(ValueError, match="DOWNLOAD_CHUNK_SIZE"):
+        Settings(drive_download_chunk_size=0).validate_embedding()
 
 
 def test_openai_compatible_contract_batches_normalizes_and_sends_dimensions() -> None:

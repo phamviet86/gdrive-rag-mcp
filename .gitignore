@@ -1,9 +1,12 @@
 .DS_Store
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.log
 .coverage
 .pytest_cache/
 .mypy_cache/
@@ -22,3 +25,8 @@ credentials*.json
 client_secret*.json
 token*.json
 oauth*.json
+service_account*.json
+service-account*.json
+application_default_credentials.json
+*.pem
+*.key

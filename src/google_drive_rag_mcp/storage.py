@@ -5,7 +5,7 @@ import math
 import sqlite3
 from array import array
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,19 +52,24 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
         try:
-            import sqlite_vec
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA journal_mode=WAL")
+            try:
+                import sqlite_vec
 
-            connection.enable_load_extension(True)
-            sqlite_vec.load(connection)
-            connection.enable_load_extension(False)
-            self.vector_extension = True
-        except (ImportError, sqlite3.Error):
-            self.vector_extension = False
-        return connection
+                connection.enable_load_extension(True)
+                sqlite_vec.load(connection)
+                connection.enable_load_extension(False)
+                self.vector_extension = True
+            except (ImportError, sqlite3.Error):
+                self.vector_extension = False
+            return connection
+        except BaseException:
+            with suppress(Exception):
+                connection.close()
+            raise
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -163,7 +168,7 @@ class SQLiteStore:
                     "This legacy index contains vectors but no embedding identity, so their model "
                     "cannot be safely inferred. Run `google-drive-rag-mcp reindex --yes` to "
                     "rebuild it, "
-                    "or set GOOGLE_DRIVE_RAG_DB_PATH/GOOGLE_DRIVE_RAG_INDEX_PROFILE to a new index."
+                    "or set GOOGLE_DRIVE_RAG_DB_PATH to a different index."
                 )
             if not chunk_count:
                 if self.vector_extension:
@@ -176,7 +181,7 @@ class SQLiteStore:
             raise ReindexRequiredError(
                 "Embedding configuration does not match this index. "
                 f"Stored={stored}; configured={expected}. "
-                "Run `google-drive-rag-mcp reindex --yes` or select a different database/profile."
+                "Run `google-drive-rag-mcp reindex --yes` or select a different database path."
             )
 
     @staticmethod

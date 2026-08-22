@@ -11,7 +11,8 @@ class Request:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
 
-    def execute(self) -> dict[str, Any]:
+    def execute(self, *, num_retries: int = 0) -> dict[str, Any]:
+        assert num_retries == 5
         return self.payload
 
 
@@ -48,7 +49,7 @@ def document(document_id: str) -> SourceDocument:
 
 def test_changes_batch_tracks_updates_deletes_and_new_token() -> None:
     source = object.__new__(GoogleDriveSource)
-    source.settings = SimpleNamespace(shared_drive_id=None)
+    source.settings = SimpleNamespace(shared_drive_id=None, drive_api_num_retries=5)
     source.service = Service(
         {
             "changes": [
@@ -58,7 +59,10 @@ def test_changes_batch_tracks_updates_deletes_and_new_token() -> None:
             "newStartPageToken": "next-token",
         }
     )
-    source.document_by_id = lambda file_id: document(file_id)  # type: ignore[method-assign]
+    source._resolve_document_change = lambda file_id: (  # type: ignore[method-assign]
+        document(file_id),
+        False,
+    )
 
     batch = source.changes("old-token")
 
@@ -70,7 +74,7 @@ def test_changes_batch_tracks_updates_deletes_and_new_token() -> None:
 
 def test_folder_change_requests_full_reconciliation() -> None:
     source = object.__new__(GoogleDriveSource)
-    source.settings = SimpleNamespace(shared_drive_id=None)
+    source.settings = SimpleNamespace(shared_drive_id=None, drive_api_num_retries=5)
     source.service = Service(
         {
             "changes": [{"fileId": "folder", "file": {"mimeType": FOLDER_MIME}}],
@@ -79,3 +83,24 @@ def test_folder_change_requests_full_reconciliation() -> None:
     )
 
     assert source.changes("old-token").full_rescan_required
+
+
+def test_change_lookup_only_deletes_when_resolution_explicitly_allows_it() -> None:
+    source = object.__new__(GoogleDriveSource)
+    source.settings = SimpleNamespace(shared_drive_id=None, drive_api_num_retries=5)
+    source.service = Service(
+        {
+            "changes": [
+                {"fileId": "not-found", "file": {"mimeType": "text/plain"}},
+                {"fileId": "ignored", "file": {"mimeType": "text/plain"}},
+            ],
+            "newStartPageToken": "next-token",
+        }
+    )
+    source._resolve_document_change = lambda file_id: (  # type: ignore[method-assign]
+        (None, True) if file_id == "not-found" else (None, False)
+    )
+
+    batch = source.changes("old-token")
+
+    assert batch.delete_document_ids == frozenset({"not-found"})

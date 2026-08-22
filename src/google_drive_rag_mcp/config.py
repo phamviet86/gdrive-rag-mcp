@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from .embeddings import EmbeddingIdentity
 
 SUPPORTED_EMBED_PROVIDERS = {"gemini", "openai-compatible", "sentence-transformers"}
+MAX_DRIVE_API_NUM_RETRIES = 10
 
 
 def _int(name: str, default: int) -> int:
@@ -38,20 +39,11 @@ def _provider(value: str) -> str:
     return normalized
 
 
-def _profile_path(profile: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", profile):
-        raise ValueError(
-            "GOOGLE_DRIVE_RAG_INDEX_PROFILE may contain only letters, numbers, ., _, and -"
-        )
-    return Path("data/index.db" if profile == "default" else f"data/index-{profile}.db")
-
-
 @dataclass(frozen=True, slots=True)
 class Settings:
     folder_id: str = ""
     shared_drive_id: str | None = None
     db_path: Path = Path("data/index.db")
-    index_profile: str = "default"
     embed_provider: str = "gemini"
     embed_model: str = "gemini-embedding-001"
     embed_dimensions: int = 768
@@ -66,23 +58,22 @@ class Settings:
     chunk_size: int = 700
     chunk_overlap: int = 100
     evidence_threshold: float = 0.35
+    drive_api_num_retries: int = 5
+    drive_download_chunk_size: int = 8 * 1024 * 1024
     token_file: Path = Path.home() / ".config/google-drive-rag-mcp/token.json"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "db_path", self.db_path.expanduser())
+        object.__setattr__(self, "token_file", self.token_file.expanduser())
 
     @classmethod
     def from_env(cls) -> Settings:
         provider = _provider(os.getenv("GOOGLE_DRIVE_RAG_EMBED_PROVIDER", "gemini"))
         default_key_env = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
-        profile = os.getenv("GOOGLE_DRIVE_RAG_INDEX_PROFILE", "default")
-        db_path = (
-            Path(os.environ["GOOGLE_DRIVE_RAG_DB_PATH"])
-            if "GOOGLE_DRIVE_RAG_DB_PATH" in os.environ
-            else _profile_path(profile)
-        )
         settings = cls(
             folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
             shared_drive_id=os.getenv("GOOGLE_DRIVE_SHARED_DRIVE_ID") or None,
-            db_path=db_path,
-            index_profile=profile,
+            db_path=Path(os.getenv("GOOGLE_DRIVE_RAG_DB_PATH", "data/index.db")).expanduser(),
             embed_provider=provider,
             embed_model=os.getenv("GOOGLE_DRIVE_RAG_EMBED_MODEL", "gemini-embedding-001"),
             embed_dimensions=_int("GOOGLE_DRIVE_RAG_EMBED_DIMENSIONS", 768),
@@ -99,12 +90,14 @@ class Settings:
             chunk_size=_int("GOOGLE_DRIVE_RAG_CHUNK_SIZE", 700),
             chunk_overlap=_int("GOOGLE_DRIVE_RAG_CHUNK_OVERLAP", 100),
             evidence_threshold=_float("GOOGLE_DRIVE_RAG_EVIDENCE_THRESHOLD", 0.35),
+            drive_api_num_retries=_int("GOOGLE_DRIVE_API_NUM_RETRIES", 5),
+            drive_download_chunk_size=_int("GOOGLE_DRIVE_DOWNLOAD_CHUNK_SIZE", 8 * 1024 * 1024),
             token_file=Path(
                 os.getenv(
                     "GOOGLE_TOKEN_FILE",
                     str(Path.home() / ".config/google-drive-rag-mcp/token.json"),
                 )
-            ),
+            ).expanduser(),
         )
         settings.validate_embedding()
         return settings
@@ -119,6 +112,13 @@ class Settings:
             raise ValueError("GOOGLE_DRIVE_RAG_EMBED_BATCH_SIZE must be positive")
         if self.embed_timeout_seconds <= 0:
             raise ValueError("GOOGLE_DRIVE_RAG_EMBED_TIMEOUT_SECONDS must be positive")
+        if not 0 <= self.drive_api_num_retries <= MAX_DRIVE_API_NUM_RETRIES:
+            raise ValueError(
+                "GOOGLE_DRIVE_API_NUM_RETRIES must be an integer from 0 to "
+                f"{MAX_DRIVE_API_NUM_RETRIES}"
+            )
+        if self.drive_download_chunk_size <= 0:
+            raise ValueError("GOOGLE_DRIVE_DOWNLOAD_CHUNK_SIZE must be positive")
         if self.embed_provider == "openai-compatible" and not self.embed_base_url:
             raise ValueError("GOOGLE_DRIVE_RAG_EMBED_BASE_URL is required for openai-compatible")
         parsed_url = urlsplit(self.embed_base_url)
@@ -136,7 +136,6 @@ class Settings:
             raise ValueError(
                 "GOOGLE_DRIVE_RAG_EMBED_API_KEY_ENV must be an environment variable name"
             )
-        _profile_path(self.index_profile)
 
     def embedding_api_key(self, required: bool) -> str:
         value = os.getenv(self.embed_api_key_env, "")
@@ -163,7 +162,7 @@ class Settings:
             missing.append("GOOGLE_DRIVE_FOLDER_ID")
         if self.embed_provider == "gemini" and not os.getenv(self.embed_api_key_env):
             missing.append(self.embed_api_key_env)
-        if not self.token_file.exists():
+        if not self.token_file.expanduser().exists():
             missing.append("Google OAuth token; run google-drive-rag-mcp-auth --client-secret FILE")
         if missing:
             raise ValueError("Missing sync configuration: " + ", ".join(missing))

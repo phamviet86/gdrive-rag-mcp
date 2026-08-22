@@ -2,4 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
     url: https://github.com/phamviet86/google-drive-rag-mcp/security/advisories/new
-    about: Report vulnerabilities privately; do not open a public issue.
+    about: Report vulnerabilities privately; never include credentials in a public issue.
+  - name: Setup and troubleshooting guide
+    url: https://github.com/phamviet86/google-drive-rag-mcp#troubleshooting
+    about: Check OAuth, token paths, sync retries, indexing, and MCP discovery before filing an issue.

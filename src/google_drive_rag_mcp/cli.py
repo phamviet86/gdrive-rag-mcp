@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
 from .config import Settings
 from .drive import run_oauth
+from .logging_utils import emit_stderr
 from .server import create_mcp_server
 from .service import KnowledgeService
 from .storage import SQLiteStore
@@ -17,6 +20,31 @@ app = typer.Typer(
     invoke_without_command=True,
     help="Google Drive hybrid retrieval MCP server",
 )
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _structured_errors(operation: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(function: Callable[P, R]) -> Callable[P, R]:
+        @wraps(function)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                return function(*args, **kwargs)
+            except (typer.Exit, typer.BadParameter):
+                raise
+            except Exception as error:
+                emit_stderr(
+                    "command_failed",
+                    operation=operation,
+                    error_type=type(error).__name__,
+                    message=str(error),
+                )
+                raise typer.Exit(code=1) from error
+
+        return wrapped
+
+    return decorator
 
 
 @app.callback()
@@ -27,6 +55,7 @@ def main(ctx: typer.Context) -> None:
 
 
 @app.command("init-db")
+@_structured_errors("init-db")
 def init_db() -> None:
     """Initialize or migrate the SQLite index."""
     settings = Settings.from_env()
@@ -35,6 +64,7 @@ def init_db() -> None:
 
 
 @app.command()
+@_structured_errors("sync")
 def sync(
     full: Annotated[
         bool,
@@ -48,6 +78,7 @@ def sync(
 
 
 @app.command("sync-loop")
+@_structured_errors("sync-loop")
 def sync_loop(
     interval_seconds: Annotated[int, typer.Option(min=30)] = 300,
     full_interval_seconds: Annotated[int, typer.Option(min=300)] = 86400,
@@ -69,6 +100,7 @@ def sync_loop(
 
 
 @app.command()
+@_structured_errors("status")
 def status() -> None:
     """Show index counts and freshness without external API calls."""
     settings = Settings.from_env()
@@ -77,13 +109,14 @@ def status() -> None:
 
 
 @app.command()
+@_structured_errors("reindex")
 def reindex(
     yes: Annotated[
         bool,
         typer.Option("--yes", help="Confirm deletion and full rebuild of generated index data."),
     ] = False,
 ) -> None:
-    """Delete the selected generated index and rebuild it with the configured embedder."""
+    """Delete the shared generated index and rebuild it with the configured embedder."""
     if not yes:
         raise typer.BadParameter("Reindex deletes generated index data; rerun with --yes")
     settings = Settings.from_env()
@@ -100,6 +133,7 @@ def reindex(
 
 
 @app.command("auth-google")
+@_structured_errors("auth-google")
 def auth_google(
     client_secret: Annotated[
         Path,
@@ -118,6 +152,12 @@ def auth_google(
     try:
         path = run_oauth(Settings.from_env(), client_secret)
     except ValueError as error:
+        emit_stderr(
+            "command_failed",
+            operation="auth-google",
+            error_type=type(error).__name__,
+            message=str(error),
+        )
         raise typer.BadParameter(str(error), param_hint="--client-secret") from error
     typer.echo(f"OAuth token stored with user-only permissions at {path}")
 
@@ -128,6 +168,7 @@ def auth_google_cli() -> None:
 
 
 @app.command()
+@_structured_errors("serve")
 def serve() -> None:
     """Run the local MCP server over stdio."""
     settings = Settings.from_env()

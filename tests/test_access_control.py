@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from google_drive_rag_mcp.embeddings import HashingEmbedder
@@ -77,7 +78,7 @@ def test_folder_id_scopes_to_all_descendants(tmp_path: Path) -> None:
 
 def test_legacy_database_is_migrated_with_folder_ancestry(tmp_path: Path) -> None:
     path = tmp_path / "legacy.db"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as connection, connection as db:
         db.execute(
             """CREATE TABLE documents(
                 id TEXT PRIMARY KEY,name TEXT,mime_type TEXT,modified_time TEXT,
@@ -85,13 +86,13 @@ def test_legacy_database_is_migrated_with_folder_ancestry(tmp_path: Path) -> Non
             )"""
         )
     SQLiteStore(path, 8)
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as connection, connection as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
     assert {
         "relative_path",
         "parent_folder_id",
         "folder_ancestry",
     } <= columns
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as connection, connection as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
     assert "document_folder_ancestors" in tables

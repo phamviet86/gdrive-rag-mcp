@@ -36,21 +36,24 @@ class KnowledgeService:
         if indexed_root != self.settings.folder_id:
             return self.full_sync()
         source = GoogleDriveSource(self.settings)
-        indexer = Indexer(
-            source,
-            self.store,
-            self.embedder,
-            LlamaIndexChunker(self.settings.chunk_size, self.settings.chunk_overlap),
-        )
-        page_token = self.store.get_state("drive_start_page_token")
-        if not isinstance(page_token, str) or not page_token:
-            return self.full_sync(source, indexer)
-        batch = source.changes(page_token)
-        if batch.full_rescan_required:
-            return self.full_sync(source, indexer)
-        summary = indexer.sync_changes(batch)
-        self.store.set_state("drive_start_page_token", batch.new_start_page_token)
-        return summary
+        try:
+            indexer = Indexer(
+                source,
+                self.store,
+                self.embedder,
+                LlamaIndexChunker(self.settings.chunk_size, self.settings.chunk_overlap),
+            )
+            page_token = self.store.get_state("drive_start_page_token")
+            if not isinstance(page_token, str) or not page_token:
+                return self._run_full_sync(source, indexer)
+            batch = source.changes(page_token)
+            if batch.full_rescan_required:
+                return self._run_full_sync(source, indexer)
+            summary = indexer.sync_changes(batch)
+            self.store.set_state("drive_start_page_token", batch.new_start_page_token)
+            return summary
+        finally:
+            source.close()
 
     def full_sync(
         self,
@@ -59,12 +62,22 @@ class KnowledgeService:
     ) -> dict[str, object]:
         self.settings.require_sync()
         source = source or GoogleDriveSource(self.settings)
-        indexer = indexer or Indexer(
-            source,
-            self.store,
-            self.embedder,
-            LlamaIndexChunker(self.settings.chunk_size, self.settings.chunk_overlap),
-        )
+        try:
+            indexer = indexer or Indexer(
+                source,
+                self.store,
+                self.embedder,
+                LlamaIndexChunker(self.settings.chunk_size, self.settings.chunk_overlap),
+            )
+            return self._run_full_sync(source, indexer)
+        finally:
+            source.close()
+
+    def _run_full_sync(
+        self,
+        source: GoogleDriveSource,
+        indexer: Indexer,
+    ) -> dict[str, object]:
         page_token = source.start_page_token()
         summary = indexer.sync()
         summary["mode"] = "full"
